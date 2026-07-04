@@ -1,0 +1,7 @@
+.env*
+!.env.example
+
+certificates
+data/
+/kalshi-alerts
+/kalshi-verify
