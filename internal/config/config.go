@@ -19,11 +19,20 @@ type Config struct {
 	KalshiPrivateKeyPEM string // PEM contents (takes precedence)
 	KalshiBaseURL       string
 
+	// SMS provider: telnyx or twilio.
+	SMSProvider string
+
 	// Telnyx credentials.
 	TelnyxAPIKey     string
 	TelnyxFromNumber string
 	TelnyxPublicKey  string // base64 Ed25519 key for webhook verification
 	TelnyxBaseURL    string
+
+	// Twilio credentials.
+	TwilioAccountSID string
+	TwilioAuthToken  string
+	TwilioFromNumber string
+	TwilioWebhookURL string // full public URL for webhook signature verification
 
 	// Alerting targets, normalized to E.164.
 	AlertPhoneNumbers []string
@@ -66,6 +75,11 @@ func Load() (*Config, error) {
 		TelnyxPublicKey:  os.Getenv("TELNYX_PUBLIC_KEY"),
 		TelnyxBaseURL:    getEnv("TELNYX_BASE_URL", "https://api.telnyx.com"),
 
+		TwilioAccountSID: os.Getenv("TWILIO_ACCOUNT_SID"),
+		TwilioAuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioFromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
+		TwilioWebhookURL: os.Getenv("TWILIO_WEBHOOK_URL"),
+
 		LibSQLURL:       os.Getenv("LIBSQL_URL"),
 		LibSQLAuthToken: os.Getenv("LIBSQL_AUTH_TOKEN"),
 		Port:            getEnv("PORT", "8080"),
@@ -87,14 +101,34 @@ func Load() (*Config, error) {
 		errs = append(errs, "LIBSQL_URL is required")
 	}
 
-	for name, val := range map[string]string{
-		"KALSHI_API_KEY_ID":  cfg.KalshiAPIKeyID,
-		"TELNYX_API_KEY":     cfg.TelnyxAPIKey,
-		"TELNYX_FROM_NUMBER": cfg.TelnyxFromNumber,
-	} {
-		if val == "" {
-			errs = append(errs, fmt.Sprintf("%s is required", name))
+	if cfg.KalshiAPIKeyID == "" {
+		errs = append(errs, "KALSHI_API_KEY_ID is required")
+	}
+
+	cfg.SMSProvider = strings.ToLower(getEnv("SMS_PROVIDER", "telnyx"))
+	switch cfg.SMSProvider {
+	case "telnyx":
+		if cfg.TelnyxAPIKey == "" {
+			errs = append(errs, "TELNYX_API_KEY is required")
 		}
+		if cfg.TelnyxFromNumber == "" {
+			errs = append(errs, "TELNYX_FROM_NUMBER is required")
+		}
+	case "twilio":
+		if cfg.TwilioAccountSID == "" {
+			errs = append(errs, "TWILIO_ACCOUNT_SID is required")
+		}
+		if cfg.TwilioAuthToken == "" {
+			errs = append(errs, "TWILIO_AUTH_TOKEN is required")
+		}
+		if cfg.TwilioFromNumber == "" {
+			errs = append(errs, "TWILIO_FROM_NUMBER is required")
+		}
+		if cfg.TwilioWebhookURL == "" {
+			errs = append(errs, "TWILIO_WEBHOOK_URL is required")
+		}
+	default:
+		errs = append(errs, "SMS_PROVIDER must be telnyx or twilio")
 	}
 
 	if raw := os.Getenv("ALERT_PHONE_NUMBER"); raw == "" {

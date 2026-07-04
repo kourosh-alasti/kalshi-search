@@ -57,10 +57,12 @@ markets listed on Kalshi, including market prices, closing times, and
 links to view markets. The Service is a personal notification tool.
 
 2. ELIGIBILITY AND OPT-IN
-The Service is available only to users who have opted in by providing
-their phone number to the Service operator. By opting in, you consent to
-receive recurring automated SMS messages at the number provided.
-Consent is not a condition of any purchase.
+The Service is available only to users who have opted in. To subscribe, text
+START to +1-213-905-4405 from your mobile phone, then complete category
+selection as instructed in the welcome message. Opt-in instructions and
+consent disclosure are published at /opt-in on this host. By opting in, you
+consent to receive recurring automated SMS messages at the number you text
+from. Consent is not a condition of any purchase.
 
 3. NOT FINANCIAL ADVICE
 Alerts are informational only and do not constitute financial,

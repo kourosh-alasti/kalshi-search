@@ -13,15 +13,15 @@ import (
 	"github.com/kourosh/kalshi-search/internal/config"
 	"github.com/kourosh/kalshi-search/internal/kalshi"
 	"github.com/kourosh/kalshi-search/internal/learning"
+	"github.com/kourosh/kalshi-search/internal/sms"
 	"github.com/kourosh/kalshi-search/internal/state"
-	"github.com/kourosh/kalshi-search/internal/telnyx"
 )
 
 // Scanner runs the periodic market scan.
 type Scanner struct {
 	cfg     *config.Config
 	kalshi  *kalshi.Client
-	sms     *telnyx.Client
+	sms     sms.Client
 	store   *state.Store
 	scorer  *learning.CounterScorer
 	sugLog  *learning.SuggestionLog
@@ -31,7 +31,7 @@ type Scanner struct {
 
 // New wires up a scanner. healthy is called with the success/failure of each
 // scan cycle (used by the health endpoint).
-func New(cfg *config.Config, kc *kalshi.Client, sms *telnyx.Client, store *state.Store,
+func New(cfg *config.Config, kc *kalshi.Client, sms sms.Client, store *state.Store,
 	scorer *learning.CounterScorer, sugLog *learning.SuggestionLog, logger *slog.Logger, healthy func(bool)) *Scanner {
 	return &Scanner{
 		cfg: cfg, kalshi: kc, sms: sms, store: store,

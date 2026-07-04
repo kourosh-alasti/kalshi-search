@@ -1,5 +1,5 @@
 // kalshi-alerts scans Kalshi markets for low-odds opportunities and texts
-// them via Telnyx. See README.md for setup and configuration.
+// them via Telnyx or Twilio. See README.md for setup and configuration.
 package main
 
 import (
@@ -19,8 +19,10 @@ import (
 	"github.com/kourosh/kalshi-search/internal/learning"
 	"github.com/kourosh/kalshi-search/internal/scanner"
 	"github.com/kourosh/kalshi-search/internal/server"
+	"github.com/kourosh/kalshi-search/internal/sms"
 	"github.com/kourosh/kalshi-search/internal/state"
 	"github.com/kourosh/kalshi-search/internal/telnyx"
+	"github.com/kourosh/kalshi-search/internal/twilio"
 )
 
 func main() {
@@ -33,6 +35,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 	logger.Info("starting kalshi-alerts",
+		"sms_provider", cfg.SMSProvider,
 		"poll_interval", cfg.PollInterval.String(),
 		"max_price_cents", cfg.MaxPriceCents,
 		"min_volume", cfg.MinVolume,
@@ -63,12 +66,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	smsClient := telnyx.NewClient(cfg.TelnyxBaseURL, cfg.TelnyxAPIKey, cfg.TelnyxFromNumber, logger)
+	var smsClient sms.Client
+	switch cfg.SMSProvider {
+	case "twilio":
+		smsClient = twilio.NewClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioFromNumber, logger)
+	default:
+		smsClient = telnyx.NewClient(cfg.TelnyxBaseURL, cfg.TelnyxAPIKey, cfg.TelnyxFromNumber, logger)
+	}
 	scorer := learning.NewCounterScorer(store, logger)
 	sugLog := learning.NewSuggestionLog(sqlDB, logger)
 	cmdHandler := commands.New(store, smsClient, scorer, sugLog, logger)
 
-	srv := server.New(cfg.TelnyxPublicKey, cfg.AlertPhoneNumbers, cmdHandler, logger)
+	srv := server.New(cfg.TelnyxPublicKey, cfg.TwilioAuthToken, cfg.TwilioWebhookURL, cfg.AlertPhoneNumbers, cmdHandler, logger)
 	scan := scanner.New(cfg, kalshiClient, smsClient, store, scorer, sugLog, logger, srv.SetHealthy)
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

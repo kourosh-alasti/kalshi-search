@@ -11,14 +11,14 @@ import (
 	"strings"
 
 	"github.com/kourosh/kalshi-search/internal/learning"
+	"github.com/kourosh/kalshi-search/internal/sms"
 	"github.com/kourosh/kalshi-search/internal/state"
-	"github.com/kourosh/kalshi-search/internal/telnyx"
 )
 
-// Handler executes SMS commands and replies via Telnyx.
+// Handler executes SMS commands and replies via the configured SMS provider.
 type Handler struct {
 	store  *state.Store
-	sms    *telnyx.Client
+	sms    sms.Client
 	scorer *learning.CounterScorer
 	sugLog *learning.SuggestionLog
 	logger *slog.Logger
@@ -26,7 +26,7 @@ type Handler struct {
 
 // New returns a command handler. Replies go to whichever allowed number sent
 // the command.
-func New(store *state.Store, sms *telnyx.Client, scorer *learning.CounterScorer,
+func New(store *state.Store, sms sms.Client, scorer *learning.CounterScorer,
 	sugLog *learning.SuggestionLog, logger *slog.Logger) *Handler {
 	return &Handler{
 		store: store, sms: sms, scorer: scorer, sugLog: sugLog,

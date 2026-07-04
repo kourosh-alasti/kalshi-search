@@ -1,6 +1,6 @@
 # Kalshi SMS Alert Bot
 
-A Go service that continuously scans [Kalshi](https://kalshi.com) markets for contracts with low implied odds (default: YES buyable at ≤ 30¢, i.e. ≤ 30% implied probability with a ~3.3x+ payout), texts you each opportunity via [Telnyx](https://telnyx.com), and learns from which suggestions you act on to send more trades like the ones you take.
+A Go service that continuously scans [Kalshi](https://kalshi.com) markets for contracts with low implied odds (default: YES buyable at ≤ 30¢, i.e. ≤ 30% implied probability with a ~3.3x+ payout), texts you each opportunity via [Telnyx](https://telnyx.com) or [Twilio](https://twilio.com), and learns from which suggestions you act on to send more trades like the ones you take.
 
 No web UI — everything is configured through environment variables and controlled by texting the bot back.
 
@@ -17,12 +17,23 @@ No web UI — everything is configured through environment variables and control
 ### 1. Kalshi API key
 Create an API key at kalshi.com → Profile Settings → API Keys. Set `KALSHI_API_KEY_ID` and either paste the PEM into `KALSHI_API_PRIVATE_KEY` or point `KALSHI_PRIVATE_KEY_PATH` at the file (locally it defaults to `certificates/kalshi-private-key.pem`). Read access is sufficient.
 
-### 2. Telnyx
+### 2. SMS provider
+
+Set `SMS_PROVIDER` to `telnyx` (default) or `twilio`.
+
+#### Telnyx
 1. Create an API key in the [Telnyx Mission Control Portal](https://portal.telnyx.com) → API Keys → `TELNYX_API_KEY`.
 2. Buy an SMS-capable number and assign it to a Messaging Profile → `TELNYX_FROM_NUMBER` (E.164, `+1...`).
 3. On that Messaging Profile, set the inbound webhook URL to `https://<your-app>/webhooks/telnyx` (API v2 format).
 4. Copy your account public key (Account Settings → Keys & Credentials → Public Key) → `TELNYX_PUBLIC_KEY`; it's used to verify webhook signatures.
-5. Set `ALERT_PHONE_NUMBER` to the phone number(s) to alert — a comma-separated list, either bare 10-digit US numbers (`4155551234,3105556789`) or E.164 (`+14155551234`). Alerts go to every number; commands are only accepted from these numbers, and replies go back to whoever sent them.
+
+#### Twilio
+1. Copy your Account SID and Auth Token from the [Twilio Console](https://console.twilio.com) → `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`.
+2. Buy an SMS-capable number → `TWILIO_FROM_NUMBER` (E.164, `+1...`).
+3. On that number's Messaging Configuration, set the inbound webhook URL to `https://<your-app>/webhooks/twilio` (HTTP POST).
+4. Set `TWILIO_WEBHOOK_URL` to that same full public URL — Twilio's `X-Twilio-Signature` is validated against it.
+
+For both providers, set `ALERT_PHONE_NUMBER` to the phone number(s) to alert — a comma-separated list, either bare 10-digit US numbers (`4155551234,3105556789`) or E.164 (`+14155551234`). Alerts go to every number; commands are only accepted from these numbers, and replies go back to whoever sent them.
 
 ### 3. Run locally
 
@@ -40,13 +51,13 @@ set -a && source .env && set +a
 go run ./cmd/kalshi-alerts
 ```
 
-To receive webhook replies locally you'll need a tunnel (e.g. `ngrok http 8080`) registered as the webhook URL on your Telnyx Messaging Profile.
+To receive webhook replies locally you'll need a tunnel (e.g. `ngrok http 8080`) registered as the webhook URL on your Telnyx Messaging Profile or Twilio phone number.
 
 ### 4. Deploy to Railway
 1. Create a Railway project from this repo — the included `Dockerfile` and `railway.json` are picked up automatically (health check on `GET /healthz`).
 2. Add a **libSQL** database (Railway libSQL template or Turso) and set `LIBSQL_URL` and `LIBSQL_AUTH_TOKEN` on the app service. Railway can inject these when you link the database.
 3. Set all required env vars (see `.env.example`). Paste the private key PEM directly into `KALSHI_API_PRIVATE_KEY` (Railway handles multiline values).
-4. After the first deploy, set `https://<app>.up.railway.app/webhooks/telnyx` as the webhook URL on your Telnyx Messaging Profile.
+4. After the first deploy, set `https://<app>.up.railway.app/webhooks/telnyx` or `https://<app>.up.railway.app/webhooks/twilio` as the webhook URL on your SMS provider (and set `TWILIO_WEBHOOK_URL` to match if using Twilio).
 
 On first boot the bot texts you the category menu; reply with numbers to start receiving alerts.
 
@@ -56,9 +67,14 @@ On first boot the bot texts you the category menu; reply with numbers to start r
 |---|---|---|
 | `KALSHI_API_KEY_ID` | — | Kalshi API key ID (required) |
 | `KALSHI_API_PRIVATE_KEY` | — | PEM contents; or use `KALSHI_PRIVATE_KEY_PATH` |
-| `TELNYX_API_KEY` | — | Telnyx API key (required) |
-| `TELNYX_FROM_NUMBER` | — | Your Telnyx SMS number, E.164 (required) |
-| `TELNYX_PUBLIC_KEY` | — | Base64 Ed25519 key for webhook verification |
+| `SMS_PROVIDER` | `telnyx` | `telnyx` or `twilio` |
+| `TELNYX_API_KEY` | — | Telnyx API key (required when `SMS_PROVIDER=telnyx`) |
+| `TELNYX_FROM_NUMBER` | — | Your Telnyx SMS number, E.164 (required when `SMS_PROVIDER=telnyx`) |
+| `TELNYX_PUBLIC_KEY` | — | Base64 Ed25519 key for Telnyx webhook verification |
+| `TWILIO_ACCOUNT_SID` | — | Twilio account SID (required when `SMS_PROVIDER=twilio`) |
+| `TWILIO_AUTH_TOKEN` | — | Twilio auth token (required when `SMS_PROVIDER=twilio`) |
+| `TWILIO_FROM_NUMBER` | — | Your Twilio SMS number, E.164 (required when `SMS_PROVIDER=twilio`) |
+| `TWILIO_WEBHOOK_URL` | — | Full public webhook URL for Twilio signature verification |
 | `ALERT_PHONE_NUMBER` | — | Comma-separated numbers, 10-digit US or E.164 (required) |
 | `MAX_PRICE_CENTS` | `30` | Alert when YES ask ≤ this (implied odds %) |
 | `MIN_VOLUME` | `1000` | Minimum lifetime contract volume |
@@ -76,4 +92,4 @@ On first boot the bot texts you the category menu; reply with numbers to start r
 
 ## Logging
 
-Structured JSON logs on stdout via `log/slog`: every scan cycle (events/markets fetched, matches, per-reason filter counts, duration), every Kalshi and Telnyx HTTP call (status, latency), every alert, every inbound command, and all errors with context. Set `LOG_LEVEL=debug` to see why each individual market was filtered or how each suggestion was scored.
+Structured JSON logs on stdout via `log/slog`: every scan cycle (events/markets fetched, matches, per-reason filter counts, duration), every Kalshi and SMS HTTP call (status, latency), every alert, every inbound command, and all errors with context. Set `LOG_LEVEL=debug` to see why each individual market was filtered or how each suggestion was scored.

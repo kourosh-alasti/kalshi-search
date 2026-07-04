@@ -18,11 +18,27 @@ import (
 
 func main() {
 	// Only Kalshi credentials matter here; stub the rest if unset.
-	for _, kv := range [][2]string{
-		{"TELNYX_API_KEY", "unused"},
-		{"TELNYX_FROM_NUMBER", "+10000000000"},
+	provider := os.Getenv("SMS_PROVIDER")
+	if provider == "" {
+		provider = "telnyx"
+	}
+	stubs := [][2]string{
 		{"ALERT_PHONE_NUMBER", "+10000000000"},
-	} {
+	}
+	if provider == "twilio" {
+		stubs = append(stubs,
+			[2]string{"TWILIO_ACCOUNT_SID", "unused"},
+			[2]string{"TWILIO_AUTH_TOKEN", "unused"},
+			[2]string{"TWILIO_FROM_NUMBER", "+10000000000"},
+			[2]string{"TWILIO_WEBHOOK_URL", "https://example.com/webhooks/twilio"},
+		)
+	} else {
+		stubs = append(stubs,
+			[2]string{"TELNYX_API_KEY", "unused"},
+			[2]string{"TELNYX_FROM_NUMBER", "+10000000000"},
+		)
+	}
+	for _, kv := range stubs {
 		if os.Getenv(kv[0]) == "" {
 			os.Setenv(kv[0], kv[1])
 		}

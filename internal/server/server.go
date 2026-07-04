@@ -1,5 +1,5 @@
-// Package server exposes the HTTP endpoints: the Telnyx webhook receiver
-// and a health check for Railway.
+// Package server exposes the HTTP endpoints: SMS webhook receivers and a health
+// check for Railway.
 package server
 
 import (
@@ -7,35 +7,41 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sync/atomic"
 	"time"
 
 	"github.com/kourosh/kalshi-search/internal/commands"
 	"github.com/kourosh/kalshi-search/internal/telnyx"
+	"github.com/kourosh/kalshi-search/internal/twilio"
 )
 
 // Server holds HTTP handler state.
 type Server struct {
-	telnyxPublicKey string
-	allowedPhones   map[string]bool
-	handler         *commands.Handler
-	logger          *slog.Logger
-	healthy         atomic.Bool
+	telnyxPublicKey  string
+	twilioAuthToken  string
+	twilioWebhookURL string
+	allowedPhones    map[string]bool
+	handler          *commands.Handler
+	logger           *slog.Logger
+	healthy          atomic.Bool
 }
 
 // New creates the server. Commands are only accepted from alertPhones.
 // Health starts true so Railway's initial check passes before the first
 // scan completes.
-func New(telnyxPublicKey string, alertPhones []string, handler *commands.Handler, logger *slog.Logger) *Server {
+func New(telnyxPublicKey, twilioAuthToken, twilioWebhookURL string, alertPhones []string, handler *commands.Handler, logger *slog.Logger) *Server {
 	allowed := make(map[string]bool, len(alertPhones))
 	for _, p := range alertPhones {
 		allowed[p] = true
 	}
 	s := &Server{
-		telnyxPublicKey: telnyxPublicKey,
-		allowedPhones:   allowed,
-		handler:         handler,
-		logger:          logger.With("component", "server"),
+		telnyxPublicKey:  telnyxPublicKey,
+		twilioAuthToken:  twilioAuthToken,
+		twilioWebhookURL: twilioWebhookURL,
+		allowedPhones:    allowed,
+		handler:          handler,
+		logger:           logger.With("component", "server"),
 	}
 	s.healthy.Store(true)
 	return s
@@ -48,7 +54,9 @@ func (s *Server) SetHealthy(ok bool) { s.healthy.Store(ok) }
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("POST /webhooks/telnyx", s.handleWebhook)
+	mux.HandleFunc("POST /webhooks/telnyx", s.handleTelnyxWebhook)
+	mux.HandleFunc("POST /webhooks/twilio", s.handleTwilioWebhook)
+	mux.HandleFunc("GET /opt-in", staticHTML(optInPage))
 	mux.HandleFunc("GET /privacy", staticText(privacyPolicy))
 	mux.HandleFunc("GET /terms", staticText(termsAndConditions))
 	return mux
@@ -57,6 +65,13 @@ func (s *Server) Routes() *http.ServeMux {
 func staticText(body string) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+func staticHTML(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(body))
 	}
 }
@@ -70,7 +85,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
@@ -116,6 +131,61 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The request context dies when this handler returns, so use a fresh one.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.handler.Handle(ctx, msg.From, msg.Text)
+	}()
+}
+
+func (s *Server) handleTwilioWebhook(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read error", http.StatusBadRequest)
+		return
+	}
+
+	params, err := url.ParseQuery(string(body))
+	if err != nil {
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+
+	if s.twilioAuthToken != "" && s.twilioWebhookURL != "" {
+		err := twilio.VerifySignature(
+			s.twilioAuthToken,
+			s.twilioWebhookURL,
+			r.Header.Get("X-Twilio-Signature"),
+			params,
+		)
+		if err != nil {
+			s.logger.Warn("twilio webhook rejected", "error", err, "remote", r.RemoteAddr)
+			http.Error(w, "invalid signature", http.StatusForbidden)
+			return
+		}
+	} else {
+		s.logger.Warn("TWILIO_AUTH_TOKEN or TWILIO_WEBHOOK_URL not set; accepting webhook without verification")
+	}
+
+	msg, err := twilio.ParseInbound(body)
+	if err != nil {
+		s.logger.Error("twilio webhook parse failed", "error", err)
+		http.Error(w, "bad payload", http.StatusBadRequest)
+		return
+	}
+
+	// Acknowledge quickly; process the command asynchronously.
+	w.WriteHeader(http.StatusOK)
+
+	if msg == nil {
+		s.logger.Debug("ignoring twilio webhook without inbound message fields")
+		return
+	}
+	if !s.allowedPhones[msg.From] {
+		s.logger.Warn("ignoring inbound message from unknown number", "from", msg.From)
+		return
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
