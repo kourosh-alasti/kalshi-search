@@ -28,7 +28,8 @@ type Scanner struct {
 	logger  *slog.Logger
 	healthy func(bool)
 
-	seriesTags map[string][]string
+	seriesTags   map[string][]string
+	seriesTagsAt time.Time
 }
 
 // New wires up a scanner. healthy is called with the success/failure of each
@@ -82,7 +83,7 @@ func (s *Scanner) cycle(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetching events: %w", err)
 	}
-	if err := s.refreshSeriesTags(ctx, events); err != nil {
+	if err := s.refreshSeriesTags(events); err != nil {
 		s.logger.Warn("series tag refresh failed", "error", err)
 	}
 
@@ -441,41 +442,62 @@ func TagsForCategories(categories []string, tagsByCategory map[string][]string) 
 	return out
 }
 
-func (s *Scanner) refreshSeriesTags(ctx context.Context, events []kalshi.Event) error {
-	seen := map[string]bool{}
-	var tickers []string
-	for _, ev := range events {
-		if ev.SeriesTicker == "" || seen[ev.SeriesTicker] {
-			continue
-		}
-		seen[ev.SeriesTicker] = true
-		tickers = append(tickers, ev.SeriesTicker)
-	}
-	if len(tickers) == 0 {
-		s.seriesTags = map[string][]string{}
+func (s *Scanner) refreshSeriesTags(events []kalshi.Event) error {
+	if !s.anyUserNeedsSubcategoryTags() {
 		return nil
 	}
 
-	tags := make(map[string][]string, len(tickers))
-	for _, ticker := range tickers {
-		if cached, ok := s.seriesTags[ticker]; ok {
-			tags[ticker] = cached
-			continue
-		}
-		series, err := s.kalshi.GetSeries(ctx, ticker)
-		if err != nil {
-			s.logger.Debug("series tag lookup failed", "series", ticker, "error", err)
-			continue
-		}
-		tags[ticker] = append([]string(nil), series.Tags...)
-		select {
-		case <-time.After(100 * time.Millisecond):
-		case <-ctx.Done():
-			return ctx.Err()
+	const cacheTTL = time.Hour
+	if time.Since(s.seriesTagsAt) < cacheTTL && len(s.seriesTags) > 0 {
+		return nil
+	}
+
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	series, err := s.kalshi.ListSeries(refreshCtx)
+	if err != nil {
+		return err
+	}
+
+	needed := map[string]bool{}
+	for _, ev := range events {
+		if ev.SeriesTicker != "" {
+			needed[ev.SeriesTicker] = true
 		}
 	}
+
+	tags := make(map[string][]string, len(needed))
+	for _, ser := range series {
+		if !needed[ser.Ticker] {
+			continue
+		}
+		tags[ser.Ticker] = append([]string(nil), ser.Tags...)
+	}
 	s.seriesTags = tags
+	s.seriesTagsAt = time.Now()
+	s.logger.Info("series tags refreshed", "series", len(tags))
 	return nil
+}
+
+func (s *Scanner) anyUserNeedsSubcategoryTags() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, recipient := range s.cfg.AlertRecipients {
+		var subs map[string][]string
+		if err := s.store.View(ctx, recipient, func(d *state.Data) {
+			subs = d.Subcategories
+		}); err != nil {
+			continue
+		}
+		for _, tags := range subs {
+			if len(tags) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func matchesSubcategories(ev kalshi.Event, selected map[string][]string, seriesTags map[string][]string) bool {

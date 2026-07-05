@@ -126,6 +126,9 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, out any
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = err
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("kalshi %s: %w", path, err)
+			}
 			c.logger.WarnContext(ctx, "kalshi request failed", "path", path, "attempt", attempt, "error", err)
 			continue
 		}
@@ -223,6 +226,33 @@ func (c *Client) GetSeries(ctx context.Context, seriesTicker string) (Series, er
 		return Series{}, fmt.Errorf("fetching series %s: %w", seriesTicker, err)
 	}
 	return resp.Series, nil
+}
+
+// ListSeries fetches all series metadata, following cursor pagination.
+func (c *Client) ListSeries(ctx context.Context) ([]Series, error) {
+	var series []Series
+	cursor := ""
+	for page := 1; ; page++ {
+		q := url.Values{"limit": {"200"}}
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+		var resp seriesListResponse
+		if err := c.get(ctx, "/series", q, &resp); err != nil {
+			return nil, fmt.Errorf("listing series page %d: %w", page, err)
+		}
+		series = append(series, resp.Series...)
+		if resp.Cursor == "" || len(resp.Series) == 0 {
+			break
+		}
+		cursor = resp.Cursor
+		select {
+		case <-time.After(250 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return series, nil
 }
 
 // ListPositions fetches all current market positions, following cursor

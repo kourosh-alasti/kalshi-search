@@ -152,6 +152,11 @@ type seriesResponse struct {
 	Series Series `json:"series"`
 }
 
+type seriesListResponse struct {
+	Series []Series `json:"series"`
+	Cursor string   `json:"cursor"`
+}
+
 type tagsByCategoriesResponse struct {
 	TagsByCategories map[string][]string `json:"tags_by_categories"`
 }
