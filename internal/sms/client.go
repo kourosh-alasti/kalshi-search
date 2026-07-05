@@ -1,10 +1,11 @@
 // Package sms defines the outbound messaging interface shared by scanner and
-// commands. Concrete providers live in internal/telnyx and internal/twilio.
+// commands. SMS providers live in internal/telnyx and internal/twilio; email
+// alerts use internal/email (UseSend).
 package sms
 
 import "context"
 
-// Client sends SMS messages to E.164 phone numbers.
+// Client sends alert messages to a recipient address (E.164 phone or email).
 type Client interface {
 	SendSMS(ctx context.Context, to, body string) error
 }

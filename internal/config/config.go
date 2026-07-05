@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/mail"
 	"os"
 	"strconv"
 	"strings"
@@ -19,7 +20,10 @@ type Config struct {
 	KalshiPrivateKeyPEM string // PEM contents (takes precedence)
 	KalshiBaseURL       string
 
-	// SMS provider: telnyx or twilio.
+	// Notification channel: sms or email (mutually exclusive).
+	NotifyChannel string
+
+	// SMS provider: telnyx or twilio (required when NotifyChannel=sms).
 	SMSProvider string
 
 	// Telnyx credentials.
@@ -34,8 +38,15 @@ type Config struct {
 	TwilioFromNumber string
 	TwilioWebhookURL string // full public URL for webhook signature verification
 
-	// Alerting targets, normalized to E.164.
-	AlertPhoneNumbers []string
+	// Alert recipients: E.164 phone numbers (sms) or email addresses (email).
+	AlertRecipients []string
+
+	// UseSend credentials (required when NotifyChannel=email).
+	UseSendAPIKey     string
+	UseSendFromEmail  string
+	UseSendBaseURL    string
+	UseSendSubject    string
+	UseSendReplyTo    []string
 
 	// Scanner filters.
 	MaxPriceCents       int
@@ -80,6 +91,10 @@ func Load() (*Config, error) {
 		TwilioFromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
 		TwilioWebhookURL: os.Getenv("TWILIO_WEBHOOK_URL"),
 
+		UseSendAPIKey:    os.Getenv("USESEND_API_KEY"),
+		UseSendFromEmail: os.Getenv("USESEND_FROM_EMAIL"),
+		UseSendBaseURL:   os.Getenv("USESEND_BASE_URL"),
+
 		LibSQLURL:       os.Getenv("LIBSQL_URL"),
 		LibSQLAuthToken: os.Getenv("LIBSQL_AUTH_TOKEN"),
 		Port:            getEnv("PORT", "8080"),
@@ -105,49 +120,89 @@ func Load() (*Config, error) {
 		errs = append(errs, "KALSHI_API_KEY_ID is required")
 	}
 
-	cfg.SMSProvider = strings.ToLower(getEnv("SMS_PROVIDER", "telnyx"))
-	switch cfg.SMSProvider {
-	case "telnyx":
-		if cfg.TelnyxAPIKey == "" {
-			errs = append(errs, "TELNYX_API_KEY is required")
-		}
-		if cfg.TelnyxFromNumber == "" {
-			errs = append(errs, "TELNYX_FROM_NUMBER is required")
-		}
-	case "twilio":
-		if cfg.TwilioAccountSID == "" {
-			errs = append(errs, "TWILIO_ACCOUNT_SID is required")
-		}
-		if cfg.TwilioAuthToken == "" {
-			errs = append(errs, "TWILIO_AUTH_TOKEN is required")
-		}
-		if cfg.TwilioFromNumber == "" {
-			errs = append(errs, "TWILIO_FROM_NUMBER is required")
-		}
-		if cfg.TwilioWebhookURL == "" {
-			errs = append(errs, "TWILIO_WEBHOOK_URL is required")
-		}
+	cfg.NotifyChannel = strings.ToLower(getEnv("NOTIFY_CHANNEL", "sms"))
+	switch cfg.NotifyChannel {
+	case "sms", "email":
 	default:
-		errs = append(errs, "SMS_PROVIDER must be telnyx or twilio")
+		errs = append(errs, "NOTIFY_CHANNEL must be sms or email")
 	}
 
-	if raw := os.Getenv("ALERT_PHONE_NUMBER"); raw == "" {
-		errs = append(errs, "ALERT_PHONE_NUMBER is required")
-	} else {
-		for _, part := range strings.Split(raw, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
-			}
-			num, err := NormalizePhone(part)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("ALERT_PHONE_NUMBER entry %q: %v", part, err))
-				continue
-			}
-			cfg.AlertPhoneNumbers = append(cfg.AlertPhoneNumbers, num)
+	hasPhone := strings.TrimSpace(os.Getenv("ALERT_PHONE_NUMBER")) != ""
+	hasEmail := strings.TrimSpace(os.Getenv("ALERT_EMAIL")) != ""
+	if hasPhone && hasEmail {
+		errs = append(errs, "set either ALERT_PHONE_NUMBER or ALERT_EMAIL, not both")
+	}
+
+	switch cfg.NotifyChannel {
+	case "sms":
+		if !hasPhone {
+			errs = append(errs, "ALERT_PHONE_NUMBER is required when NOTIFY_CHANNEL=sms")
+		} else if hasEmail {
+			errs = append(errs, "ALERT_EMAIL must not be set when NOTIFY_CHANNEL=sms")
+		} else if err := cfg.loadAlertPhones(&errs); err != nil {
+			return nil, err
 		}
-		if len(cfg.AlertPhoneNumbers) == 0 && len(errs) == 0 {
-			errs = append(errs, "ALERT_PHONE_NUMBER contains no valid numbers")
+	case "email":
+		if !hasEmail {
+			errs = append(errs, "ALERT_EMAIL is required when NOTIFY_CHANNEL=email")
+		} else if hasPhone {
+			errs = append(errs, "ALERT_PHONE_NUMBER must not be set when NOTIFY_CHANNEL=email")
+		} else if err := cfg.loadAlertEmails(&errs); err != nil {
+			return nil, err
+		}
+	}
+
+	if cfg.NotifyChannel == "sms" {
+		cfg.SMSProvider = strings.ToLower(getEnv("SMS_PROVIDER", "telnyx"))
+		switch cfg.SMSProvider {
+		case "telnyx":
+			if cfg.TelnyxAPIKey == "" {
+				errs = append(errs, "TELNYX_API_KEY is required when NOTIFY_CHANNEL=sms")
+			}
+			if cfg.TelnyxFromNumber == "" {
+				errs = append(errs, "TELNYX_FROM_NUMBER is required when NOTIFY_CHANNEL=sms")
+			}
+		case "twilio":
+			if cfg.TwilioAccountSID == "" {
+				errs = append(errs, "TWILIO_ACCOUNT_SID is required when NOTIFY_CHANNEL=sms")
+			}
+			if cfg.TwilioAuthToken == "" {
+				errs = append(errs, "TWILIO_AUTH_TOKEN is required when NOTIFY_CHANNEL=sms")
+			}
+			if cfg.TwilioFromNumber == "" {
+				errs = append(errs, "TWILIO_FROM_NUMBER is required when NOTIFY_CHANNEL=sms")
+			}
+			if cfg.TwilioWebhookURL == "" {
+				errs = append(errs, "TWILIO_WEBHOOK_URL is required when NOTIFY_CHANNEL=sms")
+			}
+		default:
+			errs = append(errs, "SMS_PROVIDER must be telnyx or twilio")
+		}
+	}
+
+	if cfg.NotifyChannel == "email" {
+		if cfg.UseSendAPIKey == "" {
+			errs = append(errs, "USESEND_API_KEY is required when NOTIFY_CHANNEL=email")
+		}
+		if cfg.UseSendFromEmail == "" {
+			errs = append(errs, "USESEND_FROM_EMAIL is required when NOTIFY_CHANNEL=email")
+		} else if _, err := NormalizeEmail(cfg.UseSendFromEmail); err != nil {
+			errs = append(errs, fmt.Sprintf("USESEND_FROM_EMAIL: %v", err))
+		}
+		cfg.UseSendSubject = getEnv("USESEND_SUBJECT", "Kalshi Alerts")
+		if raw := os.Getenv("USESEND_REPLY_TO"); raw != "" {
+			for _, part := range strings.Split(raw, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				addr, err := NormalizeEmail(part)
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("USESEND_REPLY_TO entry %q: %v", part, err))
+					continue
+				}
+				cfg.UseSendReplyTo = append(cfg.UseSendReplyTo, addr)
+			}
 		}
 	}
 
@@ -201,6 +256,59 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("invalid configuration:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return cfg, nil
+}
+
+// NormalizeEmail validates and normalizes an email address.
+func NormalizeEmail(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("email address is required")
+	}
+	addr, err := mail.ParseAddress(s)
+	if err != nil {
+		return "", fmt.Errorf("invalid email address")
+	}
+	return strings.ToLower(addr.Address), nil
+}
+
+func (cfg *Config) loadAlertPhones(errs *[]string) error {
+	raw := os.Getenv("ALERT_PHONE_NUMBER")
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		num, err := NormalizePhone(part)
+		if err != nil {
+			*errs = append(*errs, fmt.Sprintf("ALERT_PHONE_NUMBER entry %q: %v", part, err))
+			continue
+		}
+		cfg.AlertRecipients = append(cfg.AlertRecipients, num)
+	}
+	if len(cfg.AlertRecipients) == 0 && len(*errs) == 0 {
+		*errs = append(*errs, "ALERT_PHONE_NUMBER contains no valid numbers")
+	}
+	return nil
+}
+
+func (cfg *Config) loadAlertEmails(errs *[]string) error {
+	raw := os.Getenv("ALERT_EMAIL")
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		addr, err := NormalizeEmail(part)
+		if err != nil {
+			*errs = append(*errs, fmt.Sprintf("ALERT_EMAIL entry %q: %v", part, err))
+			continue
+		}
+		cfg.AlertRecipients = append(cfg.AlertRecipients, addr)
+	}
+	if len(cfg.AlertRecipients) == 0 && len(*errs) == 0 {
+		*errs = append(*errs, "ALERT_EMAIL contains no valid addresses")
+	}
+	return nil
 }
 
 // NormalizePhone converts a phone number to E.164, assuming US (+1) for

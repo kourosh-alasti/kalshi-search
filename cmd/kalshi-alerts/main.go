@@ -15,6 +15,7 @@ import (
 	"github.com/kourosh/kalshi-search/internal/commands"
 	"github.com/kourosh/kalshi-search/internal/config"
 	"github.com/kourosh/kalshi-search/internal/db"
+	"github.com/kourosh/kalshi-search/internal/email"
 	"github.com/kourosh/kalshi-search/internal/kalshi"
 	"github.com/kourosh/kalshi-search/internal/learning"
 	"github.com/kourosh/kalshi-search/internal/scanner"
@@ -35,6 +36,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 	logger.Info("starting kalshi-alerts",
+		"notify_channel", cfg.NotifyChannel,
 		"sms_provider", cfg.SMSProvider,
 		"poll_interval", cfg.PollInterval.String(),
 		"max_price_cents", cfg.MaxPriceCents,
@@ -53,9 +55,9 @@ func main() {
 	defer sqlDB.Close()
 
 	store := state.Open(sqlDB, logger)
-	for _, phone := range cfg.AlertPhoneNumbers {
-		if err := store.EnsureUser(ctx, phone); err != nil {
-			logger.Error("creating user failed", "phone", phone, "error", err)
+	for _, recipient := range cfg.AlertRecipients {
+		if err := store.EnsureUser(ctx, recipient); err != nil {
+			logger.Error("creating user failed", "recipient", recipient, "error", err)
 			os.Exit(1)
 		}
 	}
@@ -66,19 +68,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	var smsClient sms.Client
-	switch cfg.SMSProvider {
-	case "twilio":
-		smsClient = twilio.NewClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioFromNumber, logger)
+	var msgClient sms.Client
+	switch cfg.NotifyChannel {
+	case "email":
+		var err error
+		msgClient, err = email.NewClient(cfg.UseSendAPIKey, cfg.UseSendBaseURL, cfg.UseSendFromEmail, cfg.UseSendSubject, cfg.UseSendReplyTo, logger)
+		if err != nil {
+			logger.Error("creating email client failed", "error", err)
+			os.Exit(1)
+		}
 	default:
-		smsClient = telnyx.NewClient(cfg.TelnyxBaseURL, cfg.TelnyxAPIKey, cfg.TelnyxFromNumber, logger)
+		switch cfg.SMSProvider {
+		case "twilio":
+			msgClient = twilio.NewClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioFromNumber, logger)
+		default:
+			msgClient = telnyx.NewClient(cfg.TelnyxBaseURL, cfg.TelnyxAPIKey, cfg.TelnyxFromNumber, logger)
+		}
 	}
 	scorer := learning.NewCounterScorer(store, logger)
 	sugLog := learning.NewSuggestionLog(sqlDB, logger)
-	cmdHandler := commands.New(store, smsClient, scorer, sugLog, logger)
+	cmdHandler := commands.New(store, msgClient, scorer, sugLog, logger)
 
-	srv := server.New(cfg.TelnyxPublicKey, cfg.TwilioAuthToken, cfg.TwilioWebhookURL, cfg.AlertPhoneNumbers, cmdHandler, logger)
-	scan := scanner.New(cfg, kalshiClient, smsClient, store, scorer, sugLog, logger, srv.SetHealthy)
+	srv := server.New(cfg, cmdHandler, logger)
+	scan := scanner.New(cfg, kalshiClient, msgClient, store, scorer, sugLog, logger, srv.SetHealthy)
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

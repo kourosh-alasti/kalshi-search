@@ -42,7 +42,7 @@ func New(cfg *config.Config, kc *kalshi.Client, sms sms.Client, store *state.Sto
 
 // Run polls until ctx is cancelled. The first cycle runs immediately.
 func (s *Scanner) Run(ctx context.Context) {
-	s.logger.Info("scanner started", "interval", s.cfg.PollInterval.String(), "users", len(s.cfg.AlertPhoneNumbers))
+	s.logger.Info("scanner started", "interval", s.cfg.PollInterval.String(), "users", len(s.cfg.AlertRecipients))
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
 
@@ -86,15 +86,15 @@ func (s *Scanner) cycle(ctx context.Context) error {
 		s.logger.Warn("position detection failed", "error", err)
 	}
 
-	for _, phone := range s.cfg.AlertPhoneNumbers {
-		if err := s.cycleForUser(ctx, phone, events); err != nil {
-			return fmt.Errorf("scan for %s: %w", phone, err)
+	for _, recipient := range s.cfg.AlertRecipients {
+		if err := s.cycleForUser(ctx, recipient, events); err != nil {
+			return fmt.Errorf("scan for %s: %w", recipient, err)
 		}
 	}
 
 	s.logger.Info("scan cycle complete",
 		"duration_ms", time.Since(start).Milliseconds(),
-		"events", len(events), "users", len(s.cfg.AlertPhoneNumbers))
+		"events", len(events), "users", len(s.cfg.AlertRecipients))
 	return nil
 }
 
@@ -263,9 +263,9 @@ func (s *Scanner) alert(ctx context.Context, phone string, candidates []candidat
 		s.sugLog.Append(ctx, phone, rec)
 	}
 
-	body := fmt.Sprintf("Kalshi picks (reply TOOK <id> / PASS <id>):\n\n%s\n\nReply STOP to unsubscribe.", strings.Join(lines, "\n\n"))
+	body := s.alertBody(strings.Join(lines, "\n\n"))
 	if err := s.sms.SendSMS(ctx, phone, body); err != nil {
-		return fmt.Errorf("sending alert sms to %s: %w", phone, err)
+		return fmt.Errorf("sending alert to %s: %w", phone, err)
 	}
 
 	for _, sug := range newSuggestions {
@@ -290,8 +290,8 @@ func (s *Scanner) detectPositions(ctx context.Context) error {
 	}
 	var newlyAccepted []accepted
 
-	for _, phone := range s.cfg.AlertPhoneNumbers {
-		err := s.store.Update(ctx, phone, func(d *state.Data) {
+	for _, recipient := range s.cfg.AlertRecipients {
+		err := s.store.Update(ctx, recipient, func(d *state.Data) {
 			for _, p := range positions {
 				if p.Position == 0 || d.KnownPositions[p.Ticker] {
 					continue
@@ -300,8 +300,8 @@ func (s *Scanner) detectPositions(ctx context.Context) error {
 				for _, sug := range d.Suggestions {
 					if sug.Ticker == p.Ticker && sug.Label == state.LabelPending {
 						sug.Label = state.LabelPosition
-						newlyAccepted = append(newlyAccepted, accepted{phone, sug.ID, sug.Features})
-						s.logger.Info("implicit accept via position", "phone", phone, "ticker", p.Ticker, "suggestion_id", sug.ID)
+						newlyAccepted = append(newlyAccepted, accepted{recipient, sug.ID, sug.Features})
+						s.logger.Info("implicit accept via position", "recipient", recipient, "ticker", p.Ticker, "suggestion_id", sug.ID)
 					}
 				}
 			}
@@ -330,18 +330,36 @@ func (s *Scanner) onboard(ctx context.Context, phone string, events []kalshi.Eve
 	if err := s.store.Update(ctx, phone, func(d *state.Data) {
 		d.CategoryMenu = menu
 		d.Onboarded = true
+		if s.cfg.NotifyChannel == "email" {
+			d.Categories = append([]string(nil), menu...)
+		}
 	}); err != nil {
 		return err
 	}
 
-	body := "Welcome to Kalshi Alerts! Reply with numbers to enable categories (e.g. 1,3):\n" +
-		FormatCategoryMenu(menu) + "\nOr reply ALL. Other commands: LIST, STATUS, PAUSE, RESUME. Msg&data rates may apply. Reply STOP to unsubscribe, HELP for help."
+	body := s.onboardBody(menu)
 	if err := s.sms.SendSMS(ctx, phone, body); err != nil {
 		_ = s.store.Update(ctx, phone, func(d *state.Data) { d.Onboarded = false })
-		return fmt.Errorf("sending onboarding sms to %s: %w", phone, err)
+		return fmt.Errorf("sending onboarding message to %s: %w", phone, err)
 	}
-	s.logger.Info("onboarding sms sent", "phone", phone, "categories", menu)
+	s.logger.Info("onboarding message sent", "recipient", phone, "categories", menu)
 	return nil
+}
+
+func (s *Scanner) alertBody(picks string) string {
+	if s.cfg.NotifyChannel == "email" {
+		return fmt.Sprintf("Kalshi picks:\n\n%s", picks)
+	}
+	return fmt.Sprintf("Kalshi picks (reply TOOK <id> / PASS <id>):\n\n%s\n\nReply STOP to unsubscribe.", picks)
+}
+
+func (s *Scanner) onboardBody(menu []string) string {
+	if s.cfg.NotifyChannel == "email" {
+		return "Welcome to Kalshi Alerts! You'll receive email digests for all available categories:\n" +
+			FormatCategoryMenu(menu) + "\nAlerts include kalshi.com links you can open on your phone."
+	}
+	return "Welcome to Kalshi Alerts! Reply with numbers to enable categories (e.g. 1,3):\n" +
+		FormatCategoryMenu(menu) + "\nOr reply ALL. Other commands: LIST, STATUS, PAUSE, RESUME. Msg&data rates may apply. Reply STOP to unsubscribe, HELP for help."
 }
 
 // CategoriesFromEvents returns the sorted distinct categories present in events.

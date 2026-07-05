@@ -17,7 +17,11 @@ No web UI — everything is configured through environment variables and control
 ### 1. Kalshi API key
 Create an API key at kalshi.com → Profile Settings → API Keys. Set `KALSHI_API_KEY_ID` and either paste the PEM into `KALSHI_API_PRIVATE_KEY` or point `KALSHI_PRIVATE_KEY_PATH` at the file (locally it defaults to `certificates/kalshi-private-key.pem`). Read access is sufficient.
 
-### 2. SMS provider
+### 2. Notification channel
+
+Set `NOTIFY_CHANNEL` to `sms` (default) or `email`. Only one channel can be active — set either `ALERT_PHONE_NUMBER` or `ALERT_EMAIL`, not both.
+
+#### SMS (`NOTIFY_CHANNEL=sms`)
 
 Set `SMS_PROVIDER` to `telnyx` (default) or `twilio`.
 
@@ -33,7 +37,19 @@ Set `SMS_PROVIDER` to `telnyx` (default) or `twilio`.
 3. On that number's Messaging Configuration, set the inbound webhook URL to `https://<your-app>/webhooks/twilio` (HTTP POST).
 4. Set `TWILIO_WEBHOOK_URL` to that same full public URL — Twilio's `X-Twilio-Signature` is validated against it.
 
-For both providers, set `ALERT_PHONE_NUMBER` to the phone number(s) to alert — a comma-separated list, either bare 10-digit US numbers (`4155551234,3105556789`) or E.164 (`+14155551234`). Alerts go to every number; commands are only accepted from these numbers, and replies go back to whoever sent them.
+For both SMS providers, set `ALERT_PHONE_NUMBER` to the phone number(s) to alert — a comma-separated list, either bare 10-digit US numbers (`4155551234,3105556789`) or E.164 (`+14155551234`). Alerts go to every number; commands are only accepted from these numbers, and replies go back to whoever sent them.
+
+#### Email (`NOTIFY_CHANNEL=email`)
+
+While waiting for 10DLC campaign approval, you can receive alerts by email instead of SMS:
+
+1. Create an account at [UseSend](https://usesend.com) and verify your sending domain.
+2. Create an API key → `USESEND_API_KEY`.
+3. Set `USESEND_FROM_EMAIL` to your verified sender address (e.g. `alerts@yourdomain.com`).
+4. Set `ALERT_EMAIL` to the recipient address(es), comma-separated (same pattern as `ALERT_PHONE_NUMBER`).
+5. Optionally set `USESEND_SUBJECT` (default `Kalshi Alerts`) and `USESEND_REPLY_TO`.
+
+Email mode sends alert digests via UseSend and auto-enables all categories on first run. Inbound commands (TOOK/PASS, category selection) are SMS-only.
 
 ### 3. Run locally
 
@@ -67,7 +83,8 @@ On first boot the bot texts you the category menu; reply with numbers to start r
 |---|---|---|
 | `KALSHI_API_KEY_ID` | — | Kalshi API key ID (required) |
 | `KALSHI_API_PRIVATE_KEY` | — | PEM contents; or use `KALSHI_PRIVATE_KEY_PATH` |
-| `SMS_PROVIDER` | `telnyx` | `telnyx` or `twilio` |
+| `NOTIFY_CHANNEL` | `sms` | `sms` or `email` (mutually exclusive with the other channel's recipient var) |
+| `SMS_PROVIDER` | `telnyx` | `telnyx` or `twilio` (when `NOTIFY_CHANNEL=sms`) |
 | `TELNYX_API_KEY` | — | Telnyx API key (required when `SMS_PROVIDER=telnyx`) |
 | `TELNYX_FROM_NUMBER` | — | Your Telnyx SMS number, E.164 (required when `SMS_PROVIDER=telnyx`) |
 | `TELNYX_PUBLIC_KEY` | — | Base64 Ed25519 key for Telnyx webhook verification |
@@ -75,7 +92,13 @@ On first boot the bot texts you the category menu; reply with numbers to start r
 | `TWILIO_AUTH_TOKEN` | — | Twilio auth token (required when `SMS_PROVIDER=twilio`) |
 | `TWILIO_FROM_NUMBER` | — | Your Twilio SMS number, E.164 (required when `SMS_PROVIDER=twilio`) |
 | `TWILIO_WEBHOOK_URL` | — | Full public webhook URL for Twilio signature verification |
-| `ALERT_PHONE_NUMBER` | — | Comma-separated numbers, 10-digit US or E.164 (required) |
+| `ALERT_PHONE_NUMBER` | — | Comma-separated numbers when `NOTIFY_CHANNEL=sms` |
+| `ALERT_EMAIL` | — | Comma-separated addresses when `NOTIFY_CHANNEL=email` |
+| `USESEND_API_KEY` | — | UseSend API key (required when `NOTIFY_CHANNEL=email`) |
+| `USESEND_FROM_EMAIL` | — | Verified sender address (required when `NOTIFY_CHANNEL=email`) |
+| `USESEND_BASE_URL` | `https://app.usesend.com/api/v1` | UseSend API base URL |
+| `USESEND_SUBJECT` | `Kalshi Alerts` | Subject line for alert emails |
+| `USESEND_REPLY_TO` | — | Comma-separated reply-to addresses |
 | `MAX_PRICE_CENTS` | `30` | Alert when YES ask ≤ this (implied odds %) |
 | `MIN_VOLUME` | `1000` | Minimum lifetime contract volume |
 | `MIN_OPEN_INTEREST` | `500` | Minimum open interest |

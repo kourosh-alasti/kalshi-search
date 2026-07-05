@@ -12,36 +12,39 @@ import (
 	"time"
 
 	"github.com/kourosh/kalshi-search/internal/commands"
+	"github.com/kourosh/kalshi-search/internal/config"
 	"github.com/kourosh/kalshi-search/internal/telnyx"
 	"github.com/kourosh/kalshi-search/internal/twilio"
 )
 
 // Server holds HTTP handler state.
 type Server struct {
+	notifyChannel    string
 	telnyxPublicKey  string
 	twilioAuthToken  string
 	twilioWebhookURL string
-	allowedPhones    map[string]bool
+	allowedRecipients map[string]bool
 	handler          *commands.Handler
 	logger           *slog.Logger
 	healthy          atomic.Bool
 }
 
-// New creates the server. Commands are only accepted from alertPhones.
-// Health starts true so Railway's initial check passes before the first
-// scan completes.
-func New(telnyxPublicKey, twilioAuthToken, twilioWebhookURL string, alertPhones []string, handler *commands.Handler, logger *slog.Logger) *Server {
-	allowed := make(map[string]bool, len(alertPhones))
-	for _, p := range alertPhones {
-		allowed[p] = true
+// New creates the server. SMS commands are only accepted from alert recipients
+// when NOTIFY_CHANNEL=sms. Health starts true so Railway's initial check
+// passes before the first scan completes.
+func New(cfg *config.Config, handler *commands.Handler, logger *slog.Logger) *Server {
+	allowed := make(map[string]bool, len(cfg.AlertRecipients))
+	for _, r := range cfg.AlertRecipients {
+		allowed[r] = true
 	}
 	s := &Server{
-		telnyxPublicKey:  telnyxPublicKey,
-		twilioAuthToken:  twilioAuthToken,
-		twilioWebhookURL: twilioWebhookURL,
-		allowedPhones:    allowed,
-		handler:          handler,
-		logger:           logger.With("component", "server"),
+		notifyChannel:     cfg.NotifyChannel,
+		telnyxPublicKey:   cfg.TelnyxPublicKey,
+		twilioAuthToken:   cfg.TwilioAuthToken,
+		twilioWebhookURL:  cfg.TwilioWebhookURL,
+		allowedRecipients: allowed,
+		handler:           handler,
+		logger:            logger.With("component", "server"),
 	}
 	s.healthy.Store(true)
 	return s
@@ -54,8 +57,10 @@ func (s *Server) SetHealthy(ok bool) { s.healthy.Store(ok) }
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("POST /webhooks/telnyx", s.handleTelnyxWebhook)
-	mux.HandleFunc("POST /webhooks/twilio", s.handleTwilioWebhook)
+	if s.notifyChannel == "sms" {
+		mux.HandleFunc("POST /webhooks/telnyx", s.handleTelnyxWebhook)
+		mux.HandleFunc("POST /webhooks/twilio", s.handleTwilioWebhook)
+	}
 	mux.HandleFunc("GET /opt-in", staticHTML(optInPage))
 	mux.HandleFunc("GET /privacy", staticText(privacyPolicy))
 	mux.HandleFunc("GET /terms", staticText(termsAndConditions))
@@ -125,8 +130,8 @@ func (s *Server) handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		s.logger.Debug("ignoring non-inbound webhook event")
 		return
 	}
-	if !s.allowedPhones[msg.From] {
-		s.logger.Warn("ignoring inbound message from unknown number", "from", msg.From)
+	if !s.allowedRecipients[msg.From] {
+		s.logger.Warn("ignoring inbound message from unknown recipient", "from", msg.From)
 		return
 	}
 
@@ -181,8 +186,8 @@ func (s *Server) handleTwilioWebhook(w http.ResponseWriter, r *http.Request) {
 		s.logger.Debug("ignoring twilio webhook without inbound message fields")
 		return
 	}
-	if !s.allowedPhones[msg.From] {
-		s.logger.Warn("ignoring inbound message from unknown number", "from", msg.From)
+	if !s.allowedRecipients[msg.From] {
+		s.logger.Warn("ignoring inbound message from unknown recipient", "from", msg.From)
 		return
 	}
 

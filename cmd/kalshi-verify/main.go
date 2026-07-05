@@ -18,25 +18,40 @@ import (
 
 func main() {
 	// Only Kalshi credentials matter here; stub the rest if unset.
-	provider := os.Getenv("SMS_PROVIDER")
-	if provider == "" {
-		provider = "telnyx"
+	channel := os.Getenv("NOTIFY_CHANNEL")
+	if channel == "" {
+		channel = "sms"
 	}
 	stubs := [][2]string{
-		{"ALERT_PHONE_NUMBER", "+10000000000"},
+		{"LIBSQL_URL", "http://127.0.0.1:8080"},
 	}
-	if provider == "twilio" {
+	switch channel {
+	case "email":
 		stubs = append(stubs,
-			[2]string{"TWILIO_ACCOUNT_SID", "unused"},
-			[2]string{"TWILIO_AUTH_TOKEN", "unused"},
-			[2]string{"TWILIO_FROM_NUMBER", "+10000000000"},
-			[2]string{"TWILIO_WEBHOOK_URL", "https://example.com/webhooks/twilio"},
+			[2]string{"NOTIFY_CHANNEL", "email"},
+			[2]string{"ALERT_EMAIL", "alerts@example.com"},
+			[2]string{"USESEND_API_KEY", "unused"},
+			[2]string{"USESEND_FROM_EMAIL", "alerts@example.com"},
 		)
-	} else {
-		stubs = append(stubs,
-			[2]string{"TELNYX_API_KEY", "unused"},
-			[2]string{"TELNYX_FROM_NUMBER", "+10000000000"},
-		)
+	default:
+		provider := os.Getenv("SMS_PROVIDER")
+		if provider == "" {
+			provider = "telnyx"
+		}
+		stubs = append(stubs, [2]string{"ALERT_PHONE_NUMBER", "+10000000000"})
+		if provider == "twilio" {
+			stubs = append(stubs,
+				[2]string{"TWILIO_ACCOUNT_SID", "unused"},
+				[2]string{"TWILIO_AUTH_TOKEN", "unused"},
+				[2]string{"TWILIO_FROM_NUMBER", "+10000000000"},
+				[2]string{"TWILIO_WEBHOOK_URL", "https://example.com/webhooks/twilio"},
+			)
+		} else {
+			stubs = append(stubs,
+				[2]string{"TELNYX_API_KEY", "unused"},
+				[2]string{"TELNYX_FROM_NUMBER", "+10000000000"},
+			)
+		}
 	}
 	for _, kv := range stubs {
 		if os.Getenv(kv[0]) == "" {
