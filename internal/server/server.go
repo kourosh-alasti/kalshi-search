@@ -13,6 +13,7 @@ import (
 
 	"github.com/kourosh/kalshi-search/internal/commands"
 	"github.com/kourosh/kalshi-search/internal/config"
+	"github.com/kourosh/kalshi-search/internal/state"
 	"github.com/kourosh/kalshi-search/internal/telnyx"
 	"github.com/kourosh/kalshi-search/internal/twilio"
 )
@@ -25,6 +26,7 @@ type Server struct {
 	twilioWebhookURL string
 	allowedRecipients map[string]bool
 	handler          *commands.Handler
+	store            *state.Store
 	logger           *slog.Logger
 	healthy          atomic.Bool
 }
@@ -32,7 +34,7 @@ type Server struct {
 // New creates the server. SMS commands are only accepted from alert recipients
 // when NOTIFY_CHANNEL=sms. Health starts true so Railway's initial check
 // passes before the first scan completes.
-func New(cfg *config.Config, handler *commands.Handler, logger *slog.Logger) *Server {
+func New(cfg *config.Config, handler *commands.Handler, store *state.Store, logger *slog.Logger) *Server {
 	allowed := make(map[string]bool, len(cfg.AlertRecipients))
 	for _, r := range cfg.AlertRecipients {
 		allowed[r] = true
@@ -44,6 +46,7 @@ func New(cfg *config.Config, handler *commands.Handler, logger *slog.Logger) *Se
 		twilioWebhookURL:  cfg.TwilioWebhookURL,
 		allowedRecipients: allowed,
 		handler:           handler,
+		store:             store,
 		logger:            logger.With("component", "server"),
 	}
 	s.healthy.Store(true)
@@ -62,6 +65,8 @@ func (s *Server) Routes() *http.ServeMux {
 		mux.HandleFunc("POST /webhooks/twilio", s.handleTwilioWebhook)
 	}
 	mux.HandleFunc("GET /opt-in", staticHTML(optInPage))
+	mux.HandleFunc("GET /onboard/{token}", s.handleOnboardGet)
+	mux.HandleFunc("POST /onboard/{token}", s.handleOnboardPost)
 	mux.HandleFunc("GET /privacy", staticText(privacyPolicy))
 	mux.HandleFunc("GET /terms", staticText(termsAndConditions))
 	return mux

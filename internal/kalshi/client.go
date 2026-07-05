@@ -202,6 +202,29 @@ func (c *Client) ListOpenEvents(ctx context.Context) ([]Event, error) {
 	return events, nil
 }
 
+// ListTagsByCategories returns Kalshi's category-to-tag mapping used for
+// subcategory filtering.
+func (c *Client) ListTagsByCategories(ctx context.Context) (map[string][]string, error) {
+	var resp tagsByCategoriesResponse
+	if err := c.get(ctx, "/search/tags_by_categories", nil, &resp); err != nil {
+		return nil, fmt.Errorf("listing tags by categories: %w", err)
+	}
+	if resp.TagsByCategories == nil {
+		return map[string][]string{}, nil
+	}
+	return resp.TagsByCategories, nil
+}
+
+// GetSeries returns metadata for one series ticker, including tags.
+func (c *Client) GetSeries(ctx context.Context, seriesTicker string) (Series, error) {
+	var resp seriesResponse
+	path := "/series/" + url.PathEscape(seriesTicker)
+	if err := c.get(ctx, path, nil, &resp); err != nil {
+		return Series{}, fmt.Errorf("fetching series %s: %w", seriesTicker, err)
+	}
+	return resp.Series, nil
+}
+
 // ListPositions fetches all current market positions, following cursor
 // pagination until exhausted.
 func (c *Client) ListPositions(ctx context.Context) ([]MarketPosition, error) {

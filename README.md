@@ -7,7 +7,7 @@ No web UI — everything is configured through environment variables and control
 ## How it works
 
 - **Scanner loop** polls Kalshi's Trade API v2 (read-only, RSA-PSS signed requests) on `POLL_INTERVAL`, filters open markets by price, volume, open interest, close time, and your enabled categories, ranks the survivors with a preference model, and texts the top picks as one digest SMS with `kalshi.com` links that open the Kalshi app on your phone.
-- **SMS commands**: the first text you receive is a numbered category menu. Reply `1,3` to enable categories, `TOOK 12` / `PASS 12` to give feedback on suggestion #12, `LIST`, `STATUS`, `PAUSE`, `RESUME`, or `ALL`.
+- **SMS commands**: the first message you receive includes a short-lived link to choose categories and subcategories. Reply `TOOK 12` / `PASS 12` to give feedback on suggestion #12, `STATUS`, `PAUSE`, or `RESUME`.
 - **Learning**: every suggestion decomposes into features (category, series, price band, close-time bucket, volume bucket) with accept/reject counts per user. Feedback comes from your `TOOK`/`PASS` replies and automatically from your portfolio — if a new position appears in a suggested market, it counts as accepted. All suggestions and labels are stored in libSQL for future ML training (see the plan's "Future: ML-based learning").
 - **Dedup**: each market alerts at most once per user; it re-alerts only if the price drops by `REALERT_DROP_CENTS`. `PASS`ed markets never alert again.
 - **Persistence**: all state is stored in [libSQL](https://github.com/tursodatabase/libsql) keyed by phone number. Each alert recipient has independent categories, preferences, and suggestion history.
@@ -49,7 +49,7 @@ While waiting for 10DLC campaign approval, you can receive alerts by email inste
 4. Set `ALERT_EMAIL` to the recipient address(es), comma-separated (same pattern as `ALERT_PHONE_NUMBER`).
 5. Optionally set `USESEND_SUBJECT` (default `Kalshi Alerts`) and `USESEND_REPLY_TO`.
 
-Email mode sends alert digests via UseSend and auto-enables all categories on first run. Inbound commands (TOOK/PASS, category selection) are SMS-only.
+Email mode sends alert digests via UseSend. Onboarding uses the same short-lived preferences link as SMS.
 
 ### 3. Run locally
 
@@ -67,7 +67,7 @@ set -a && source .env && set +a
 go run ./cmd/kalshi-alerts
 ```
 
-To receive webhook replies locally you'll need a tunnel (e.g. `ngrok http 8080`) registered as the webhook URL on your Telnyx Messaging Profile or Twilio phone number.
+To receive webhook replies locally you'll need a tunnel (e.g. `ngrok http 8080`) registered as the webhook URL on your Telnyx Messaging Profile or Twilio phone number. Set `PUBLIC_BASE_URL` to the same tunnel URL so onboarding links work on your phone.
 
 ### 4. Deploy to Railway
 1. Create a Railway project from this repo — the included `Dockerfile` and `railway.json` are picked up automatically (health check on `GET /healthz`).
@@ -75,7 +75,7 @@ To receive webhook replies locally you'll need a tunnel (e.g. `ngrok http 8080`)
 3. Set all required env vars (see `.env.example`). Paste the private key PEM directly into `KALSHI_API_PRIVATE_KEY` (Railway handles multiline values).
 4. After the first deploy, set `https://<app>.up.railway.app/webhooks/telnyx` or `https://<app>.up.railway.app/webhooks/twilio` as the webhook URL on your SMS provider (and set `TWILIO_WEBHOOK_URL` to match if using Twilio).
 
-On first boot the bot texts you the category menu; reply with numbers to start receiving alerts.
+On first boot the bot sends you a short-lived link to choose categories and subcategories; alerts begin after you save your preferences.
 
 ## Configuration reference
 
@@ -110,7 +110,9 @@ On first boot the bot texts you the category menu; reply with numbers to start r
 | `LEARN_EXPAND_CATEGORIES` | `false` | Let well-liked series bypass category filter |
 | `LIBSQL_URL` | — | libSQL connection URL (required) |
 | `LIBSQL_AUTH_TOKEN` | — | Auth token for remote libSQL (Turso/Railway) |
-| `PORT` | `8080` | HTTP port (webhook + healthz) |
+| `PORT` | `8080` | HTTP port (webhook + healthz + onboarding) |
+| `PUBLIC_BASE_URL` | — | Public app URL for onboarding links (required) |
+| `ONBOARDING_TOKEN_TTL` | `24h` | How long preference links stay valid |
 | `LOG_LEVEL` | `info` | `debug` logs per-market filter/score decisions |
 
 ## Logging

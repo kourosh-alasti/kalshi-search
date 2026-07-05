@@ -27,6 +27,8 @@ type Scanner struct {
 	sugLog  *learning.SuggestionLog
 	logger  *slog.Logger
 	healthy func(bool)
+
+	seriesTags map[string][]string
 }
 
 // New wires up a scanner. healthy is called with the success/failure of each
@@ -80,6 +82,9 @@ func (s *Scanner) cycle(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetching events: %w", err)
 	}
+	if err := s.refreshSeriesTags(ctx, events); err != nil {
+		s.logger.Warn("series tag refresh failed", "error", err)
+	}
 
 	// Implicit feedback from portfolio positions runs even while paused.
 	if err := s.detectPositions(ctx); err != nil {
@@ -101,10 +106,12 @@ func (s *Scanner) cycle(ctx context.Context) error {
 func (s *Scanner) cycleForUser(ctx context.Context, phone string, events []kalshi.Event) error {
 	var paused, onboarded bool
 	var categories []string
+	var subcategories map[string][]string
 	if err := s.store.View(ctx, phone, func(d *state.Data) {
 		paused = d.Paused
 		onboarded = d.Onboarded
 		categories = append([]string(nil), d.Categories...)
+		subcategories = copySubcategories(d.Subcategories)
 	}); err != nil {
 		return err
 	}
@@ -134,7 +141,7 @@ func (s *Scanner) cycleForUser(ctx context.Context, phone string, events []kalsh
 	for _, ev := range events {
 		for _, m := range ev.Markets {
 			totalMarkets++
-			if reason := s.disqualify(ctx, phone, ev, m, now, enabled); reason != "" {
+			if reason := s.disqualify(ctx, phone, ev, m, now, enabled, subcategories); reason != "" {
 				counts[reason]++
 				s.logger.Debug("market filtered", "phone", phone, "ticker", m.Ticker, "reason", reason,
 					"yes_ask", m.YesAsk, "volume", m.Volume, "open_interest", m.OpenInterest)
@@ -177,7 +184,7 @@ func (s *Scanner) cycleForUser(ctx context.Context, phone string, events []kalsh
 }
 
 // disqualify returns a non-empty reason when the market fails a filter.
-func (s *Scanner) disqualify(ctx context.Context, phone string, ev kalshi.Event, m kalshi.Market, now time.Time, enabled map[string]bool) string {
+func (s *Scanner) disqualify(ctx context.Context, phone string, ev kalshi.Event, m kalshi.Market, now time.Time, enabled map[string]bool, subcategories map[string][]string) string {
 	if m.Status != "" && m.Status != "active" && m.Status != "open" {
 		return "not_active"
 	}
@@ -198,6 +205,8 @@ func (s *Scanner) disqualify(ctx context.Context, phone string, ev kalshi.Event,
 		if !(s.cfg.LearnExpandCategories && s.scorer.SeriesBoost(ctx, phone, ev.SeriesTicker)) {
 			return "category"
 		}
+	} else if !matchesSubcategories(ev, subcategories, s.seriesTags) {
+		return "subcategory"
 	}
 
 	skip := ""
@@ -320,29 +329,41 @@ func (s *Scanner) detectPositions(ctx context.Context) error {
 	return nil
 }
 
-// onboard texts the initial category menu and marks the user onboarded.
+// onboard sends a short-lived preferences link and marks the user onboarded.
 func (s *Scanner) onboard(ctx context.Context, phone string, events []kalshi.Event) error {
 	menu := CategoriesFromEvents(events)
 	if len(menu) == 0 {
 		return fmt.Errorf("no categories found in open events")
 	}
 
+	tagsByCategory, err := s.kalshi.ListTagsByCategories(ctx)
+	if err != nil {
+		return fmt.Errorf("fetching subcategories: %w", err)
+	}
+	menuTags := TagsForCategories(menu, tagsByCategory)
+
+	token, err := s.store.CreateOnboardingToken(ctx, phone, s.cfg.OnboardingTokenTTL)
+	if err != nil {
+		return err
+	}
+	link := s.cfg.PublicBaseURL + "/onboard/" + token
+
 	if err := s.store.Update(ctx, phone, func(d *state.Data) {
 		d.CategoryMenu = menu
+		d.TagsByCategory = menuTags
+		d.Categories = nil
+		d.Subcategories = map[string][]string{}
 		d.Onboarded = true
-		if s.cfg.NotifyChannel == "email" {
-			d.Categories = append([]string(nil), menu...)
-		}
 	}); err != nil {
 		return err
 	}
 
-	body := s.onboardBody(menu)
+	body := s.onboardBody(link)
 	if err := s.sms.SendSMS(ctx, phone, body); err != nil {
 		_ = s.store.Update(ctx, phone, func(d *state.Data) { d.Onboarded = false })
 		return fmt.Errorf("sending onboarding message to %s: %w", phone, err)
 	}
-	s.logger.Info("onboarding message sent", "recipient", phone, "categories", menu)
+	s.logger.Info("onboarding message sent", "recipient", phone, "categories", menu, "link", link)
 	return nil
 }
 
@@ -353,13 +374,31 @@ func (s *Scanner) alertBody(picks string) string {
 	return fmt.Sprintf("Kalshi picks (reply TOOK <id> / PASS <id>):\n\n%s\n\nReply STOP to unsubscribe.", picks)
 }
 
-func (s *Scanner) onboardBody(menu []string) string {
+func (s *Scanner) onboardBody(link string) string {
 	if s.cfg.NotifyChannel == "email" {
-		return "Welcome to Kalshi Alerts! You'll receive email digests for all available categories:\n" +
-			FormatCategoryMenu(menu) + "\nAlerts include kalshi.com links you can open on your phone."
+		return "Welcome to Kalshi Alerts!\n\n" +
+			"Choose which categories and subcategories you want alerts for:\n" + link +
+			"\n\nThis link expires in " + formatTTL(s.cfg.OnboardingTokenTTL) +
+			". Alerts include kalshi.com links you can open on your phone."
 	}
-	return "Welcome to Kalshi Alerts! Reply with numbers to enable categories (e.g. 1,3):\n" +
-		FormatCategoryMenu(menu) + "\nOr reply ALL. Other commands: LIST, STATUS, PAUSE, RESUME. Msg&data rates may apply. Reply STOP to unsubscribe, HELP for help."
+	return "Welcome to Kalshi Alerts!\n\n" +
+		"Choose your alert categories here (link expires in " + formatTTL(s.cfg.OnboardingTokenTTL) + "):\n" +
+		link + "\n\nMsg&data rates may apply. Reply STOP to unsubscribe, HELP for help."
+}
+
+func formatTTL(d time.Duration) string {
+	hours := int(d / time.Hour)
+	if hours >= 24 && hours%24 == 0 {
+		days := hours / 24
+		if days == 1 {
+			return "24 hours"
+		}
+		return fmt.Sprintf("%d days", days)
+	}
+	if hours > 0 && d%time.Hour == 0 {
+		return fmt.Sprintf("%d hours", hours)
+	}
+	return d.Round(time.Minute).String()
 }
 
 // CategoriesFromEvents returns the sorted distinct categories present in events.
@@ -384,6 +423,86 @@ func FormatCategoryMenu(menu []string) string {
 		fmt.Fprintf(&b, "%d. %s\n", i+1, c)
 	}
 	return b.String()
+}
+
+// TagsForCategories maps Kalshi tag lists onto the event categories we show.
+func TagsForCategories(categories []string, tagsByCategory map[string][]string) map[string][]string {
+	lookup := map[string][]string{}
+	for cat, tags := range tagsByCategory {
+		lookup[strings.ToLower(cat)] = tags
+	}
+	out := make(map[string][]string, len(categories))
+	for _, cat := range categories {
+		if tags, ok := lookup[strings.ToLower(cat)]; ok && len(tags) > 0 {
+			out[cat] = append([]string(nil), tags...)
+			sort.Strings(out[cat])
+		}
+	}
+	return out
+}
+
+func (s *Scanner) refreshSeriesTags(ctx context.Context, events []kalshi.Event) error {
+	seen := map[string]bool{}
+	var tickers []string
+	for _, ev := range events {
+		if ev.SeriesTicker == "" || seen[ev.SeriesTicker] {
+			continue
+		}
+		seen[ev.SeriesTicker] = true
+		tickers = append(tickers, ev.SeriesTicker)
+	}
+	if len(tickers) == 0 {
+		s.seriesTags = map[string][]string{}
+		return nil
+	}
+
+	tags := make(map[string][]string, len(tickers))
+	for _, ticker := range tickers {
+		if cached, ok := s.seriesTags[ticker]; ok {
+			tags[ticker] = cached
+			continue
+		}
+		series, err := s.kalshi.GetSeries(ctx, ticker)
+		if err != nil {
+			s.logger.Debug("series tag lookup failed", "series", ticker, "error", err)
+			continue
+		}
+		tags[ticker] = append([]string(nil), series.Tags...)
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	s.seriesTags = tags
+	return nil
+}
+
+func matchesSubcategories(ev kalshi.Event, selected map[string][]string, seriesTags map[string][]string) bool {
+	tags, ok := selected[ev.Category]
+	if !ok || len(tags) == 0 {
+		return true
+	}
+	series := seriesTags[ev.SeriesTicker]
+	for _, want := range tags {
+		for _, have := range series {
+			if strings.EqualFold(want, have) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func copySubcategories(in map[string][]string) map[string][]string {
+	if len(in) == 0 {
+		return map[string][]string{}
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
 }
 
 func marketLabel(ev kalshi.Event, m kalshi.Market) string {

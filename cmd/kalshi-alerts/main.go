@@ -89,7 +89,7 @@ func main() {
 	sugLog := learning.NewSuggestionLog(sqlDB, logger)
 	cmdHandler := commands.New(store, msgClient, scorer, sugLog, logger)
 
-	srv := server.New(cfg, cmdHandler, logger)
+	srv := server.New(cfg, cmdHandler, store, logger)
 	scan := scanner.New(cfg, kalshiClient, msgClient, store, scorer, sugLog, logger, srv.SetHealthy)
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

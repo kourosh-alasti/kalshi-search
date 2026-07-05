@@ -140,3 +140,18 @@ type positionsResponse struct {
 	MarketPositions []MarketPosition `json:"market_positions"`
 	Cursor          string           `json:"cursor"`
 }
+
+// Series is a Kalshi series with discovery metadata.
+type Series struct {
+	Ticker   string   `json:"ticker"`
+	Category string   `json:"category"`
+	Tags     []string `json:"tags"`
+}
+
+type seriesResponse struct {
+	Series Series `json:"series"`
+}
+
+type tagsByCategoriesResponse struct {
+	TagsByCategories map[string][]string `json:"tags_by_categories"`
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -75,9 +76,9 @@ func (h *Handler) Handle(ctx context.Context, from, text string) {
 		reply = h.setPaused(ctx, from, false)
 		reply = "You are subscribed to Kalshi Alerts: market alerts based on your selected categories. Msg frequency varies. Msg&data rates may apply. Reply HELP for help, STOP to cancel."
 	case strings.EqualFold(text, "HELP") || strings.EqualFold(text, "INFO"):
-		reply = "Kalshi Alerts: SMS alerts for Kalshi prediction markets. Commands: LIST (categories), STATUS, PAUSE, RESUME, TOOK <id>, PASS <id>. Msg&data rates may apply. Reply STOP to cancel."
+		reply = "Kalshi Alerts: SMS alerts for Kalshi prediction markets. Commands: STATUS, PAUSE, RESUME, TOOK <id>, PASS <id>. Category preferences are set via the onboarding link. Msg&data rates may apply. Reply STOP to cancel."
 	default:
-		reply = "Commands:\n1,3 = enable categories\nALL = all categories\nTOOK <id> / PASS <id> = feedback\nLIST = category menu\nSTATUS = current settings\nPAUSE / RESUME"
+		reply = "Commands:\nTOOK <id> / PASS <id> = feedback\nSTATUS = current settings\nPAUSE / RESUME\nCategory preferences are set via your onboarding link."
 	}
 
 	if err := h.sms.SendSMS(ctx, from, reply); err != nil {
@@ -212,10 +213,12 @@ func (h *Handler) list(ctx context.Context, phone string) string {
 func (h *Handler) status(ctx context.Context, phone string) string {
 	var paused bool
 	var categories []string
+	var subcategories map[string][]string
 	var pending, took, passed, positions int
 	if err := h.store.View(ctx, phone, func(d *state.Data) {
 		paused = d.Paused
 		categories = d.Categories
+		subcategories = d.Subcategories
 		for _, s := range d.Suggestions {
 			switch s.Label {
 			case state.LabelPending:
@@ -237,12 +240,25 @@ func (h *Handler) status(ctx context.Context, phone string) string {
 	if paused {
 		stateStr = "PAUSED"
 	}
-	cats := "none (reply LIST to choose)"
+	cats := "none (use your onboarding link to choose)"
 	if len(categories) > 0 {
 		cats = strings.Join(categories, ", ")
 	}
-	return fmt.Sprintf("Status: %s\nCategories: %s\nSuggestions: %d sent, %d taken, %d passed, %d auto-detected trades",
-		stateStr, cats, pending+took+passed+positions, took, passed, positions)
+	subs := "none"
+	if len(subcategories) > 0 {
+		var parts []string
+		for cat, tags := range subcategories {
+			if len(tags) > 0 {
+				parts = append(parts, fmt.Sprintf("%s (%s)", cat, strings.Join(tags, ", ")))
+			}
+		}
+		if len(parts) > 0 {
+			sort.Strings(parts)
+			subs = strings.Join(parts, "; ")
+		}
+	}
+	return fmt.Sprintf("Status: %s\nCategories: %s\nSubcategories: %s\nSuggestions: %d sent, %d taken, %d passed, %d auto-detected trades",
+		stateStr, cats, subs, pending+took+passed+positions, took, passed, positions)
 }
 
 func (h *Handler) setPaused(ctx context.Context, phone string, paused bool) string {

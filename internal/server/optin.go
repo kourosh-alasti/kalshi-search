@@ -26,10 +26,9 @@ const optInPage = `<!DOCTYPE html>
   <h2>How to subscribe</h2>
   <p>Text <strong>START</strong> to:</p>
   <p class="number">+1 (213) 905-4405</p>
-  <p>You will receive a welcome message asking you to choose alert categories.
-  Reply with category numbers (for example, <strong>5,14</strong> for Politics
-  and Sports) or <strong>ALL</strong>. Alert messages begin only after you
-  complete this step.</p>
+  <p>You will receive a welcome message with a link to choose alert categories
+  and optional subcategories. Alert messages begin only after you complete that
+  step.</p>
 
   <div class="disclosure">
     <strong>Consent disclosure:</strong> By texting START, you agree to receive

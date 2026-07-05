@@ -67,6 +67,8 @@ type Config struct {
 
 	// HTTP server.
 	Port string
+	PublicBaseURL       string
+	OnboardingTokenTTL  time.Duration
 
 	// Logging.
 	LogLevel slog.Level
@@ -98,6 +100,7 @@ func Load() (*Config, error) {
 		LibSQLURL:       os.Getenv("LIBSQL_URL"),
 		LibSQLAuthToken: os.Getenv("LIBSQL_AUTH_TOKEN"),
 		Port:            getEnv("PORT", "8080"),
+		PublicBaseURL:   strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 	}
 
 	var errs []string
@@ -233,6 +236,13 @@ func Load() (*Config, error) {
 	}
 	if cfg.LearnExpandCategories, err = getEnvBool("LEARN_EXPAND_CATEGORIES", false); err != nil {
 		errs = append(errs, err.Error())
+	}
+	if cfg.OnboardingTokenTTL, err = getEnvDuration("ONBOARDING_TOKEN_TTL", 24*time.Hour); err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	if cfg.PublicBaseURL == "" {
+		errs = append(errs, "PUBLIC_BASE_URL is required (e.g. https://your-app.up.railway.app)")
 	}
 
 	if cfg.MaxPriceCents < 1 || cfg.MaxPriceCents > 99 {

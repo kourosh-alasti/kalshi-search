@@ -4,7 +4,9 @@ package state
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -54,7 +56,9 @@ type Data struct {
 	Onboarded        bool                      `json:"onboarded"`
 	Paused           bool                      `json:"paused"`
 	Categories       []string                  `json:"categories"`
+	Subcategories    map[string][]string       `json:"subcategories"`     // category -> selected tags
 	CategoryMenu     []string                  `json:"category_menu"`
+	TagsByCategory   map[string][]string       `json:"tags_by_category"` // full subcategory menu
 	NextSuggestionID int                       `json:"next_suggestion_id"`
 	Suggestions      map[string]*Suggestion    `json:"suggestions"`
 	Alerted          map[string]*AlertedMarket `json:"alerted"`
@@ -136,12 +140,12 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		KnownPositions:   map[string]bool{},
 	}
 
-	var menuJSON, catsJSON string
+	var menuJSON, catsJSON, tagsJSON, subsJSON string
 	var onboarded, paused int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT onboarded, paused, category_menu, categories, next_suggestion_id
+		SELECT onboarded, paused, category_menu, categories, tags_by_category, subcategories, next_suggestion_id
 		FROM users WHERE phone = ?`, phone).Scan(
-		&onboarded, &paused, &menuJSON, &catsJSON, &data.NextSuggestionID)
+		&onboarded, &paused, &menuJSON, &catsJSON, &tagsJSON, &subsJSON, &data.NextSuggestionID)
 	if err != nil {
 		return nil, fmt.Errorf("loading user %s: %w", phone, err)
 	}
@@ -152,6 +156,24 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	}
 	if err := json.Unmarshal([]byte(catsJSON), &data.Categories); err != nil {
 		return nil, fmt.Errorf("decoding categories for %s: %w", phone, err)
+	}
+	if tagsJSON == "" {
+		tagsJSON = "{}"
+	}
+	if err := json.Unmarshal([]byte(tagsJSON), &data.TagsByCategory); err != nil {
+		return nil, fmt.Errorf("decoding tags_by_category for %s: %w", phone, err)
+	}
+	if subsJSON == "" {
+		subsJSON = "{}"
+	}
+	if err := json.Unmarshal([]byte(subsJSON), &data.Subcategories); err != nil {
+		return nil, fmt.Errorf("decoding subcategories for %s: %w", phone, err)
+	}
+	if data.TagsByCategory == nil {
+		data.TagsByCategory = map[string][]string{}
+	}
+	if data.Subcategories == nil {
+		data.Subcategories = map[string][]string{}
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -257,6 +279,14 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 	if err != nil {
 		return err
 	}
+	tagsJSON, err := json.Marshal(d.TagsByCategory)
+	if err != nil {
+		return err
+	}
+	subsJSON, err := json.Marshal(d.Subcategories)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -268,9 +298,11 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 	_, err = tx.ExecContext(ctx, `
 		UPDATE users SET
 			onboarded = ?, paused = ?, category_menu = ?, categories = ?,
+			tags_by_category = ?, subcategories = ?,
 			next_suggestion_id = ?, updated_at = ?
 		WHERE phone = ?`,
 		boolInt(d.Onboarded), boolInt(d.Paused), string(menuJSON), string(catsJSON),
+		string(tagsJSON), string(subsJSON),
 		d.NextSuggestionID, now, phone)
 	if err != nil {
 		return fmt.Errorf("updating user %s: %w", phone, err)
@@ -340,4 +372,77 @@ func boolInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+// OnboardingToken is a short-lived link for category selection.
+type OnboardingToken struct {
+	Token     string
+	Phone     string
+	ExpiresAt time.Time
+	Used      bool
+}
+
+// CreateOnboardingToken generates and stores a single-use onboarding link token.
+func (s *Store) CreateOnboardingToken(ctx context.Context, phone string, ttl time.Duration) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.ensureUserLocked(ctx, phone); err != nil {
+		return "", err
+	}
+
+	raw := make([]byte, 24)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generating token: %w", err)
+	}
+	token := hex.EncodeToString(raw)
+	now := time.Now().UTC()
+	expires := now.Add(ttl)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO onboarding_tokens (token, phone, expires_at, used, created_at)
+		VALUES (?, ?, ?, 0, ?)`,
+		token, phone, expires.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err != nil {
+		return "", fmt.Errorf("saving onboarding token: %w", err)
+	}
+	return token, nil
+}
+
+// LookupOnboardingToken returns token metadata when the link is still valid.
+func (s *Store) LookupOnboardingToken(ctx context.Context, token string) (*OnboardingToken, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var phone, expiresAt string
+	var used int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT phone, expires_at, used FROM onboarding_tokens WHERE token = ?`, token).
+		Scan(&phone, &expiresAt, &used)
+	if err != nil {
+		return nil, fmt.Errorf("token not found")
+	}
+	expires, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("decoding token expiry: %w", err)
+	}
+	t := &OnboardingToken{Token: token, Phone: phone, ExpiresAt: expires, Used: used != 0}
+	if t.Used {
+		return nil, fmt.Errorf("token already used")
+	}
+	if time.Now().After(t.ExpiresAt) {
+		return nil, fmt.Errorf("token expired")
+	}
+	return t, nil
+}
+
+// MarkOnboardingTokenUsed marks a token consumed after preferences are saved.
+func (s *Store) MarkOnboardingTokenUsed(ctx context.Context, token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `UPDATE onboarding_tokens SET used = 1 WHERE token = ?`, token)
+	if err != nil {
+		return fmt.Errorf("marking token used: %w", err)
+	}
+	return nil
 }

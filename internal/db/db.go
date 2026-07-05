@@ -81,7 +81,21 @@ CREATE TABLE IF NOT EXISTS suggestion_records (
 
 CREATE INDEX IF NOT EXISTS idx_suggestions_phone_label ON suggestions(phone, label);
 CREATE INDEX IF NOT EXISTS idx_suggestion_records_phone ON suggestion_records(phone);
+
+CREATE TABLE IF NOT EXISTS onboarding_tokens (
+	token TEXT PRIMARY KEY,
+	phone TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	used INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_onboarding_tokens_phone ON onboarding_tokens(phone);
 `
+
+var migrations = []string{
+	`ALTER TABLE users ADD COLUMN tags_by_category TEXT NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE users ADD COLUMN subcategories TEXT NOT NULL DEFAULT '{}'`,
+}
 
 // Open connects to libSQL and runs schema migrations.
 func Open(ctx context.Context, url, authToken string) (*sql.DB, error) {
@@ -102,6 +116,14 @@ func Open(ctx context.Context, url, authToken string) (*sql.DB, error) {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
+	}
+	for _, stmt := range migrations {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				db.Close()
+				return nil, fmt.Errorf("applying migration %q: %w", stmt, err)
+			}
+		}
 	}
 	return db, nil
 }
