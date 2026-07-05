@@ -36,6 +36,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(logger)
 	logger.Info("starting kalshi-alerts",
+		"enabled", cfg.Enabled,
 		"notify_channel", cfg.NotifyChannel,
 		"sms_provider", cfg.SMSProvider,
 		"poll_interval", cfg.PollInterval.String(),
@@ -55,42 +56,53 @@ func main() {
 	defer sqlDB.Close()
 
 	store := state.Open(sqlDB, logger)
-	for _, recipient := range cfg.AlertRecipients {
-		if err := store.EnsureUser(ctx, recipient); err != nil {
-			logger.Error("creating user failed", "recipient", recipient, "error", err)
-			os.Exit(1)
+	if cfg.Enabled {
+		for _, recipient := range cfg.AlertRecipients {
+			if err := store.EnsureUser(ctx, recipient); err != nil {
+				logger.Error("creating user failed", "recipient", recipient, "error", err)
+				os.Exit(1)
+			}
 		}
-	}
-
-	kalshiClient, err := kalshi.NewClient(cfg.KalshiBaseURL, cfg.KalshiAPIKeyID, cfg.KalshiPrivateKeyPEM, logger)
-	if err != nil {
-		logger.Error("creating kalshi client failed", "error", err)
-		os.Exit(1)
 	}
 
 	var msgClient sms.Client
-	switch cfg.NotifyChannel {
-	case "email":
-		var err error
-		msgClient, err = email.NewClient(cfg.UseSendAPIKey, cfg.UseSendBaseURL, cfg.UseSendFromEmail, cfg.UseSendSubject, cfg.UseSendReplyTo, logger)
-		if err != nil {
-			logger.Error("creating email client failed", "error", err)
-			os.Exit(1)
-		}
-	default:
-		switch cfg.SMSProvider {
-		case "twilio":
-			msgClient = twilio.NewClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioFromNumber, logger)
+	if cfg.Enabled {
+		switch cfg.NotifyChannel {
+		case "email":
+			var err error
+			msgClient, err = email.NewClient(cfg.UseSendAPIKey, cfg.UseSendBaseURL, cfg.UseSendFromEmail, cfg.UseSendSubject, cfg.UseSendReplyTo, logger)
+			if err != nil {
+				logger.Error("creating email client failed", "error", err)
+				os.Exit(1)
+			}
 		default:
-			msgClient = telnyx.NewClient(cfg.TelnyxBaseURL, cfg.TelnyxAPIKey, cfg.TelnyxFromNumber, logger)
+			switch cfg.SMSProvider {
+			case "twilio":
+				msgClient = twilio.NewClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken, cfg.TwilioFromNumber, logger)
+			default:
+				msgClient = telnyx.NewClient(cfg.TelnyxBaseURL, cfg.TelnyxAPIKey, cfg.TelnyxFromNumber, logger)
+			}
 		}
+	} else {
+		msgClient = sms.NewNoop(logger)
+		logger.Warn("scanner and notifications disabled (ENABLED=false)")
 	}
+
 	scorer := learning.NewCounterScorer(store, logger)
 	sugLog := learning.NewSuggestionLog(sqlDB, logger)
 	cmdHandler := commands.New(store, msgClient, scorer, sugLog, logger)
 
 	srv := server.New(cfg, cmdHandler, store, logger)
-	scan := scanner.New(cfg, kalshiClient, msgClient, store, scorer, sugLog, logger, srv.SetHealthy)
+
+	var scan *scanner.Scanner
+	if cfg.Enabled {
+		kalshiClient, err := kalshi.NewClient(cfg.KalshiBaseURL, cfg.KalshiAPIKeyID, cfg.KalshiPrivateKeyPEM, logger)
+		if err != nil {
+			logger.Error("creating kalshi client failed", "error", err)
+			os.Exit(1)
+		}
+		scan = scanner.New(cfg, kalshiClient, msgClient, store, scorer, sugLog, logger, srv.SetHealthy)
+	}
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -109,7 +121,11 @@ func main() {
 		}
 	}()
 
-	scan.Run(runCtx)
+	if scan != nil {
+		scan.Run(runCtx)
+	} else {
+		<-runCtx.Done()
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

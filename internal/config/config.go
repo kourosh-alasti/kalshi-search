@@ -72,6 +72,10 @@ type Config struct {
 
 	// Logging.
 	LogLevel slog.Level
+
+	// Enabled controls the scanner loop and outbound notifications. When false
+	// the HTTP server still runs but no markets are scanned and no messages are sent.
+	Enabled bool
 }
 
 // Load reads configuration from the environment, applying defaults and
@@ -104,6 +108,11 @@ func Load() (*Config, error) {
 	}
 
 	var errs []string
+	var err error
+
+	if cfg.Enabled, err = getEnvBool("ENABLED", true); err != nil {
+		errs = append(errs, err.Error())
+	}
 
 	// Private key: env var contents win, else read from file path.
 	if cfg.KalshiPrivateKeyPEM == "" {
@@ -123,93 +132,94 @@ func Load() (*Config, error) {
 		errs = append(errs, "KALSHI_API_KEY_ID is required")
 	}
 
-	cfg.NotifyChannel = strings.ToLower(getEnv("NOTIFY_CHANNEL", "sms"))
-	switch cfg.NotifyChannel {
-	case "sms", "email":
-	default:
-		errs = append(errs, "NOTIFY_CHANNEL must be sms or email")
-	}
-
-	hasPhone := strings.TrimSpace(os.Getenv("ALERT_PHONE_NUMBER")) != ""
-	hasEmail := strings.TrimSpace(os.Getenv("ALERT_EMAIL")) != ""
-	if hasPhone && hasEmail {
-		errs = append(errs, "set either ALERT_PHONE_NUMBER or ALERT_EMAIL, not both")
-	}
-
-	switch cfg.NotifyChannel {
-	case "sms":
-		if !hasPhone {
-			errs = append(errs, "ALERT_PHONE_NUMBER is required when NOTIFY_CHANNEL=sms")
-		} else if hasEmail {
-			errs = append(errs, "ALERT_EMAIL must not be set when NOTIFY_CHANNEL=sms")
-		} else if err := cfg.loadAlertPhones(&errs); err != nil {
-			return nil, err
-		}
-	case "email":
-		if !hasEmail {
-			errs = append(errs, "ALERT_EMAIL is required when NOTIFY_CHANNEL=email")
-		} else if hasPhone {
-			errs = append(errs, "ALERT_PHONE_NUMBER must not be set when NOTIFY_CHANNEL=email")
-		} else if err := cfg.loadAlertEmails(&errs); err != nil {
-			return nil, err
-		}
-	}
-
-	if cfg.NotifyChannel == "sms" {
-		cfg.SMSProvider = strings.ToLower(getEnv("SMS_PROVIDER", "telnyx"))
-		switch cfg.SMSProvider {
-		case "telnyx":
-			if cfg.TelnyxAPIKey == "" {
-				errs = append(errs, "TELNYX_API_KEY is required when NOTIFY_CHANNEL=sms")
-			}
-			if cfg.TelnyxFromNumber == "" {
-				errs = append(errs, "TELNYX_FROM_NUMBER is required when NOTIFY_CHANNEL=sms")
-			}
-		case "twilio":
-			if cfg.TwilioAccountSID == "" {
-				errs = append(errs, "TWILIO_ACCOUNT_SID is required when NOTIFY_CHANNEL=sms")
-			}
-			if cfg.TwilioAuthToken == "" {
-				errs = append(errs, "TWILIO_AUTH_TOKEN is required when NOTIFY_CHANNEL=sms")
-			}
-			if cfg.TwilioFromNumber == "" {
-				errs = append(errs, "TWILIO_FROM_NUMBER is required when NOTIFY_CHANNEL=sms")
-			}
-			if cfg.TwilioWebhookURL == "" {
-				errs = append(errs, "TWILIO_WEBHOOK_URL is required when NOTIFY_CHANNEL=sms")
-			}
+	if cfg.Enabled {
+		cfg.NotifyChannel = strings.ToLower(getEnv("NOTIFY_CHANNEL", "sms"))
+		switch cfg.NotifyChannel {
+		case "sms", "email":
 		default:
-			errs = append(errs, "SMS_PROVIDER must be telnyx or twilio")
+			errs = append(errs, "NOTIFY_CHANNEL must be sms or email")
 		}
-	}
 
-	if cfg.NotifyChannel == "email" {
-		if cfg.UseSendAPIKey == "" {
-			errs = append(errs, "USESEND_API_KEY is required when NOTIFY_CHANNEL=email")
+		hasPhone := strings.TrimSpace(os.Getenv("ALERT_PHONE_NUMBER")) != ""
+		hasEmail := strings.TrimSpace(os.Getenv("ALERT_EMAIL")) != ""
+		if hasPhone && hasEmail {
+			errs = append(errs, "set either ALERT_PHONE_NUMBER or ALERT_EMAIL, not both")
 		}
-		if cfg.UseSendFromEmail == "" {
-			errs = append(errs, "USESEND_FROM_EMAIL is required when NOTIFY_CHANNEL=email")
-		} else if _, err := NormalizeEmail(cfg.UseSendFromEmail); err != nil {
-			errs = append(errs, fmt.Sprintf("USESEND_FROM_EMAIL: %v", err))
+
+		switch cfg.NotifyChannel {
+		case "sms":
+			if !hasPhone {
+				errs = append(errs, "ALERT_PHONE_NUMBER is required when NOTIFY_CHANNEL=sms")
+			} else if hasEmail {
+				errs = append(errs, "ALERT_EMAIL must not be set when NOTIFY_CHANNEL=sms")
+			} else if err := cfg.loadAlertPhones(&errs); err != nil {
+				return nil, err
+			}
+		case "email":
+			if !hasEmail {
+				errs = append(errs, "ALERT_EMAIL is required when NOTIFY_CHANNEL=email")
+			} else if hasPhone {
+				errs = append(errs, "ALERT_PHONE_NUMBER must not be set when NOTIFY_CHANNEL=email")
+			} else if err := cfg.loadAlertEmails(&errs); err != nil {
+				return nil, err
+			}
 		}
-		cfg.UseSendSubject = getEnv("USESEND_SUBJECT", "Kalshi Alerts")
-		if raw := os.Getenv("USESEND_REPLY_TO"); raw != "" {
-			for _, part := range strings.Split(raw, ",") {
-				part = strings.TrimSpace(part)
-				if part == "" {
-					continue
+
+		if cfg.NotifyChannel == "sms" {
+			cfg.SMSProvider = strings.ToLower(getEnv("SMS_PROVIDER", "telnyx"))
+			switch cfg.SMSProvider {
+			case "telnyx":
+				if cfg.TelnyxAPIKey == "" {
+					errs = append(errs, "TELNYX_API_KEY is required when NOTIFY_CHANNEL=sms")
 				}
-				addr, err := NormalizeEmail(part)
-				if err != nil {
-					errs = append(errs, fmt.Sprintf("USESEND_REPLY_TO entry %q: %v", part, err))
-					continue
+				if cfg.TelnyxFromNumber == "" {
+					errs = append(errs, "TELNYX_FROM_NUMBER is required when NOTIFY_CHANNEL=sms")
 				}
-				cfg.UseSendReplyTo = append(cfg.UseSendReplyTo, addr)
+			case "twilio":
+				if cfg.TwilioAccountSID == "" {
+					errs = append(errs, "TWILIO_ACCOUNT_SID is required when NOTIFY_CHANNEL=sms")
+				}
+				if cfg.TwilioAuthToken == "" {
+					errs = append(errs, "TWILIO_AUTH_TOKEN is required when NOTIFY_CHANNEL=sms")
+				}
+				if cfg.TwilioFromNumber == "" {
+					errs = append(errs, "TWILIO_FROM_NUMBER is required when NOTIFY_CHANNEL=sms")
+				}
+				if cfg.TwilioWebhookURL == "" {
+					errs = append(errs, "TWILIO_WEBHOOK_URL is required when NOTIFY_CHANNEL=sms")
+				}
+			default:
+				errs = append(errs, "SMS_PROVIDER must be telnyx or twilio")
+			}
+		}
+
+		if cfg.NotifyChannel == "email" {
+			if cfg.UseSendAPIKey == "" {
+				errs = append(errs, "USESEND_API_KEY is required when NOTIFY_CHANNEL=email")
+			}
+			if cfg.UseSendFromEmail == "" {
+				errs = append(errs, "USESEND_FROM_EMAIL is required when NOTIFY_CHANNEL=email")
+			} else if _, err := NormalizeEmail(cfg.UseSendFromEmail); err != nil {
+				errs = append(errs, fmt.Sprintf("USESEND_FROM_EMAIL: %v", err))
+			}
+			cfg.UseSendSubject = getEnv("USESEND_SUBJECT", "Kalshi Alerts")
+			if raw := os.Getenv("USESEND_REPLY_TO"); raw != "" {
+				for _, part := range strings.Split(raw, ",") {
+					part = strings.TrimSpace(part)
+					if part == "" {
+						continue
+					}
+					addr, err := NormalizeEmail(part)
+					if err != nil {
+						errs = append(errs, fmt.Sprintf("USESEND_REPLY_TO entry %q: %v", part, err))
+						continue
+					}
+					cfg.UseSendReplyTo = append(cfg.UseSendReplyTo, addr)
+				}
 			}
 		}
 	}
 
-	var err error
 	if cfg.MaxPriceCents, err = getEnvInt("MAX_PRICE_CENTS", 30); err != nil {
 		errs = append(errs, err.Error())
 	}
