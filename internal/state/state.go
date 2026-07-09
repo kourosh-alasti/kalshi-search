@@ -251,16 +251,16 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		var featuresJSON, sentAt, label string
 		if err := rows.Scan(&sug.ID, &sug.Ticker, &sug.Title, &featuresJSON,
 			&sug.PriceCents, &sentAt, &label); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		if err := decodeJSON(featuresJSON, &sug.Features); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("decoding suggestion features: %w", err)
 		}
 		sug.SentAt, err = time.Parse(time.RFC3339Nano, sentAt)
 		if err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("decoding suggestion sent_at: %w", err)
 		}
 		sug.Label = SuggestionLabel(label)
