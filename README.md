@@ -117,7 +117,7 @@ On first boot the bot sends you a short-lived link to choose categories and subc
 | `EVENTS_CACHE_TTL` | `30s` | Reuse Kalshi event list between cycles |
 | `PASS_SUPPRESS_DAYS` | `30` | Days a `PASS` suppresses a market (0 = forever) |
 | `MAX_PER_SERIES_DIGEST` | `2` | Max picks per series in one digest |
-| `LINK_SIGNING_SECRET` | — | HMAC secret for email action links (defaults to `LIBSQL_AUTH_TOKEN`) |
+| `LINK_SIGNING_SECRET` | — | HMAC secret for email action links (required when `ENABLED=true`) |
 | `LINK_TTL` | `168h` | Signed feedback/toggle link lifetime |
 | `INSTANCE_ID` | auto | Unique id for leader election |
 | `LEADER_ELECTION` | `true` | Only one instance runs the scanner when multiple replicas deploy |

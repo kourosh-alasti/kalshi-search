@@ -198,11 +198,13 @@ func (s *Server) handleTwilioWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) enqueueInbound(from, text string) {
 	if s.inbound == nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			s.handler.Handle(ctx, from, text)
-		}()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.handler.Handle(ctx, from, text); err != nil {
+			s.logger.Error("direct inbound handling failed", "error", err, "from", from)
+		}
+	}()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

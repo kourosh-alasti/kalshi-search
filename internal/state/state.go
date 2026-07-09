@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sort"
 	"sync"
 	"time"
 )
@@ -199,24 +200,36 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	}
 	data.Onboarded = onboarded != 0
 	data.Paused = paused != 0
-	decodeJSON(menuJSON, &data.CategoryMenu)
-	decodeJSON(catsJSON, &data.Categories)
+	if err := decodeJSON(menuJSON, &data.CategoryMenu); err != nil {
+		return nil, fmt.Errorf("decoding category_menu for %s: %w", phone, err)
+	}
+	if err := decodeJSON(catsJSON, &data.Categories); err != nil {
+		return nil, fmt.Errorf("decoding categories for %s: %w", phone, err)
+	}
 	if tagsJSON == "" {
 		tagsJSON = "{}"
 	}
-	decodeJSON(tagsJSON, &data.TagsByCategory)
+	if err := decodeJSON(tagsJSON, &data.TagsByCategory); err != nil {
+		return nil, fmt.Errorf("decoding tags_by_category for %s: %w", phone, err)
+	}
 	if subsJSON == "" {
 		subsJSON = "{}"
 	}
-	decodeJSON(subsJSON, &data.Subcategories)
+	if err := decodeJSON(subsJSON, &data.Subcategories); err != nil {
+		return nil, fmt.Errorf("decoding subcategories for %s: %w", phone, err)
+	}
 	if filtersJSON == "" {
 		filtersJSON = "{}"
 	}
-	decodeJSON(filtersJSON, &data.FilterOverrides)
+	if err := decodeJSON(filtersJSON, &data.FilterOverrides); err != nil {
+		return nil, fmt.Errorf("decoding filter_overrides for %s: %w", phone, err)
+	}
 	if quietJSON == "" {
 		quietJSON = `{"enabled":false,"start_hour":22,"end_hour":8,"timezone":"America/New_York"}`
 	}
-	decodeJSON(quietJSON, &data.QuietHours)
+	if err := decodeJSON(quietJSON, &data.QuietHours); err != nil {
+		return nil, fmt.Errorf("decoding quiet_hours for %s: %w", phone, err)
+	}
 	if data.TagsByCategory == nil {
 		data.TagsByCategory = map[string][]string{}
 	}
@@ -233,25 +246,31 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading suggestions for %s: %w", phone, err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var sug Suggestion
 		var featuresJSON, sentAt, label string
 		if err := rows.Scan(&sug.ID, &sug.Ticker, &sug.Title, &featuresJSON,
 			&sug.PriceCents, &sentAt, &label); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		decodeJSON(featuresJSON, &sug.Features)
+		if err := decodeJSON(featuresJSON, &sug.Features); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("decoding suggestion features: %w", err)
+		}
 		sug.SentAt, err = time.Parse(time.RFC3339Nano, sentAt)
 		if err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("decoding suggestion sent_at: %w", err)
 		}
 		sug.Label = SuggestionLabel(label)
 		data.Suggestions[strconv.Itoa(sug.ID)] = &sug
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
 	}
+	rows.Close()
 
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT ticker, last_price_cents, last_alerted_at, suppressed, suggestion_id,
@@ -260,7 +279,6 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading alerted markets for %s: %w", phone, err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var am AlertedMarket
 		var alertedAt string
@@ -268,10 +286,12 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		var suppressedUntil sql.NullString
 		if err := rows.Scan(&am.Ticker, &am.LastPriceCents, &alertedAt, &suppressed, &am.SuggestionID,
 			&suppressedUntil, &am.LastVolume, &am.LastCloseHours); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		am.LastAlertedAt, err = time.Parse(time.RFC3339Nano, alertedAt)
 		if err != nil {
+			rows.Close()
 			return nil, fmt.Errorf("decoding alerted_at: %w", err)
 		}
 		am.Suppressed = suppressed != 0
@@ -281,62 +301,70 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		data.Alerted[am.Ticker] = &am
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
 	}
+	rows.Close()
 
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT feature, accepts, rejects FROM feature_stats WHERE phone = ?`, phone)
 	if err != nil {
 		return nil, fmt.Errorf("loading feature stats for %s: %w", phone, err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var feature string
 		var st FeatureStats
 		if err := rows.Scan(&feature, &st.Accepts, &st.Rejects); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		data.Features[feature] = &st
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
 	}
+	rows.Close()
 
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT ticker FROM known_positions WHERE phone = ?`, phone)
 	if err != nil {
 		return nil, fmt.Errorf("loading known positions for %s: %w", phone, err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var ticker string
 		if err := rows.Scan(&ticker); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		data.KnownPositions[ticker] = true
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
 	}
+	rows.Close()
 
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT ticker, max_price_cents, created_at FROM watchlist WHERE phone = ?`, phone)
 	if err != nil {
 		return nil, fmt.Errorf("loading watchlist for %s: %w", phone, err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var item WatchItem
 		var created string
 		if err := rows.Scan(&item.Ticker, &item.MaxPriceCents, &created); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		item.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		data.Watchlist[item.Ticker] = &item
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
 	}
+	rows.Close()
 
 	s.logger.Debug("user state loaded", "phone", phone,
 		"onboarded", data.Onboarded, "categories", len(data.Categories),
@@ -345,11 +373,11 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	return data, nil
 }
 
-func decodeJSON(src string, dest any) {
+func decodeJSON(src string, dest any) error {
 	if src == "" || src == "null" {
-		return
+		return nil
 	}
-	_ = json.Unmarshal([]byte(src), dest)
+	return json.Unmarshal([]byte(src), dest)
 }
 
 func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
@@ -460,26 +488,21 @@ func pruneSuggestions(d *Data, maxKeep int) {
 		id  string
 		sug *Suggestion
 	}
-	var all []entry
+	var labeled []entry
 	for id, sug := range d.Suggestions {
 		if sug.Label == LabelPending {
 			continue
 		}
-		all = append(all, entry{id, sug})
+		labeled = append(labeled, entry{id, sug})
 	}
-	if len(d.Suggestions)-len(all) <= maxKeep {
-		return
-	}
-	// Drop oldest labeled suggestions first.
-	for len(d.Suggestions) > maxKeep && len(all) > 0 {
-		oldest := 0
-		for i := 1; i < len(all); i++ {
-			if all[i].sug.SentAt.Before(all[oldest].sug.SentAt) {
-				oldest = i
-			}
+	sort.Slice(labeled, func(i, j int) bool {
+		return labeled[i].sug.SentAt.Before(labeled[j].sug.SentAt)
+	})
+	for _, e := range labeled {
+		if len(d.Suggestions) <= maxKeep {
+			break
 		}
-		delete(d.Suggestions, all[oldest].id)
-		all = append(all[:oldest], all[oldest+1:]...)
+		delete(d.Suggestions, e.id)
 	}
 }
 

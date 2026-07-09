@@ -126,13 +126,13 @@ func NewCounterScorer(store *state.Store, logger *slog.Logger) *CounterScorer {
 	return &CounterScorer{store: store, logger: logger.With("component", "learning")}
 }
 
-func (s *CounterScorer) featureRates(ctx context.Context, phone string, features []string) ([]FeatureContribution, float64) {
+func (s *CounterScorer) featureRates(ctx context.Context, phone string, features []string) ([]FeatureContribution, float64, error) {
 	if len(features) == 0 {
-		return nil, 0.5
+		return nil, 0.5, nil
 	}
 	var contribs []FeatureContribution
 	var total float64
-	_ = s.store.View(ctx, phone, func(d *state.Data) {
+	err := s.store.View(ctx, phone, func(d *state.Data) {
 		for _, f := range features {
 			rate := 0.5
 			if st, ok := d.Features[f]; ok {
@@ -142,12 +142,19 @@ func (s *CounterScorer) featureRates(ctx context.Context, phone string, features
 			total += rate
 		}
 	})
-	return contribs, total / float64(len(features))
+	if err != nil {
+		return nil, 0.5, err
+	}
+	return contribs, total / float64(len(features)), nil
 }
 
 // Score computes the mean Laplace-smoothed accept rate across features.
 func (s *CounterScorer) Score(ctx context.Context, phone string, features []string) float64 {
-	contribs, score := s.featureRates(ctx, phone, features)
+	contribs, score, err := s.featureRates(ctx, phone, features)
+	if err != nil {
+		s.logger.Warn("scoring failed", "error", err, "phone", phone)
+		return 0.5
+	}
 	var parts []string
 	for _, c := range contribs {
 		parts = append(parts, fmt.Sprintf("%s=%.2f", c.Feature, c.Rate))
@@ -156,9 +163,32 @@ func (s *CounterScorer) Score(ctx context.Context, phone string, features []stri
 	return score
 }
 
+// ScoreAndExplain returns score and rationale from a single store read.
+func (s *CounterScorer) ScoreAndExplain(ctx context.Context, phone string, features []string) (float64, string) {
+	contribs, score, err := s.featureRates(ctx, phone, features)
+	if err != nil {
+		s.logger.Warn("scoring failed", "error", err, "phone", phone)
+		return 0.5, "neutral match (50%)"
+	}
+	var parts []string
+	for _, c := range contribs {
+		parts = append(parts, fmt.Sprintf("%s=%.2f", c.Feature, c.Rate))
+	}
+	s.logger.Debug("scored market", "phone", phone, "score", fmt.Sprintf("%.3f", score), "contributions", parts)
+	return score, explainFromContribs(contribs, score)
+}
+
 // Explain returns a short human-readable rationale from top feature contributions.
 func (s *CounterScorer) Explain(ctx context.Context, phone string, features []string) string {
-	contribs, score := s.featureRates(ctx, phone, features)
+	contribs, score, err := s.featureRates(ctx, phone, features)
+	if err != nil {
+		s.logger.Warn("explain failed", "error", err, "phone", phone)
+		return "neutral match (50%)"
+	}
+	return explainFromContribs(contribs, score)
+}
+
+func explainFromContribs(contribs []FeatureContribution, score float64) string {
 	if len(contribs) == 0 {
 		return fmt.Sprintf("neutral match (%.0f%%)", score*100)
 	}

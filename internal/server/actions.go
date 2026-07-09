@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -35,6 +36,11 @@ func writeHealth(w http.ResponseWriter, code int, snap scanstats.Snapshot) {
 	_ = json.NewEncoder(w).Encode(snap)
 }
 
+func writeHTMLMessage(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Kalshi Alerts</h2><p>%s</p></body></html>`, html.EscapeString(msg))
+}
+
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	userEnc := r.PathValue("user")
 	idStr := r.PathValue("id")
@@ -59,9 +65,7 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 
 	took := strings.EqualFold(action, "took")
 	msg, _ := s.handler.ApplyFeedback(r.Context(), phone, took, suggestionID)
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Kalshi Alerts</h2><p>%s</p></body></html>`, msg)
+	writeHTMLMessage(w, msg)
 }
 
 func (s *Server) handleToggle(w http.ResponseWriter, r *http.Request) {
@@ -82,15 +86,14 @@ func (s *Server) handleToggle(w http.ResponseWriter, r *http.Request) {
 
 	enabled := strings.EqualFold(action, "enable")
 	var msg string
-	if enabled {
+	if err := s.store.Update(r.Context(), phone, func(d *state.Data) {
+		d.QuietHours.Enabled = enabled
+	}); err != nil {
+		msg = "Something went wrong saving your preference. Please try again."
+	} else if enabled {
 		msg = "Quiet hours enabled."
 	} else {
 		msg = "Quiet hours disabled."
 	}
-	_ = s.store.Update(r.Context(), phone, func(d *state.Data) {
-		d.QuietHours.Enabled = enabled
-	})
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = fmt.Fprintf(w, `<!DOCTYPE html><html><body><h2>Kalshi Alerts</h2><p>%s</p></body></html>`, msg)
+	writeHTMLMessage(w, msg)
 }

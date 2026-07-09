@@ -48,9 +48,9 @@ var (
 	filterRe     = regexp.MustCompile(`(?i)^(PRICE|VOLUME|OI|CLOSE)\s+(\d+)$`)
 )
 
-// Handle processes one inbound message. The caller sends the reply unless this is
-// invoked from the durable queue (reply is still sent here).
-func (h *Handler) Handle(ctx context.Context, from, text string) {
+// Handle processes one inbound message and delivers the reply.
+// Returns an error when the reply could not be sent.
+func (h *Handler) Handle(ctx context.Context, from, text string) error {
 	text = strings.TrimSpace(text)
 	h.logger.Info("inbound command", "from", from, "text", text)
 
@@ -108,11 +108,17 @@ func (h *Handler) Handle(ctx context.Context, from, text string) {
 	case strings.EqualFold(text, "STOP") || strings.EqualFold(text, "STOPALL") ||
 		strings.EqualFold(text, "UNSUBSCRIBE") || strings.EqualFold(text, "CANCEL") ||
 		strings.EqualFold(text, "END") || strings.EqualFold(text, "QUIT"):
-		reply = "You are unsubscribed from Kalshi Alerts and will receive no more messages. Reply START to resubscribe."
-		_ = h.setPaused(ctx, from, true)
+		if err := h.setPausedState(ctx, from, true); err != nil {
+			reply = "Something went wrong, try again."
+		} else {
+			reply = "You are unsubscribed from Kalshi Alerts and will receive no more messages. Reply START to resubscribe."
+		}
 	case strings.EqualFold(text, "START") || strings.EqualFold(text, "UNSTOP"):
-		reply = "You are subscribed to Kalshi Alerts. Reply HELP for commands, STOP to cancel."
-		_ = h.setPaused(ctx, from, false)
+		if err := h.setPausedState(ctx, from, false); err != nil {
+			reply = "Something went wrong, try again."
+		} else {
+			reply = "You are subscribed to Kalshi Alerts. Reply HELP for commands, STOP to cancel."
+		}
 	case strings.EqualFold(text, "HELP") || strings.EqualFold(text, "INFO"):
 		reply = h.helpText()
 	default:
@@ -121,7 +127,9 @@ func (h *Handler) Handle(ctx context.Context, from, text string) {
 
 	if err := h.sms.SendSMS(ctx, from, reply); err != nil {
 		h.logger.Error("sending command reply failed", "error", err)
+		return err
 	}
+	return nil
 }
 
 func (h *Handler) helpText() string {
@@ -175,19 +183,21 @@ func (h *Handler) setQuietHours(ctx context.Context, phone string, start, end in
 	if start < 0 || start > 23 || end < 0 || end > 23 {
 		return "Hours must be 0-23. Example: QUIET 22-8"
 	}
+	tz := "America/New_York"
 	err := h.store.Update(ctx, phone, func(d *state.Data) {
 		d.QuietHours.StartHour = start
 		d.QuietHours.EndHour = end
 		d.QuietHours.Enabled = true
 		if d.QuietHours.Timezone == "" {
-			d.QuietHours.Timezone = "America/New_York"
+			d.QuietHours.Timezone = tz
 		}
+		tz = d.QuietHours.Timezone
 	})
 	if err != nil {
 		return "Something went wrong, try again."
 	}
 	return fmt.Sprintf("Quiet hours set to %d:00–%d:00 (%s). Reply DISABLE to turn off.",
-		start, end, "America/New_York")
+		start, end, tz)
 }
 
 func (h *Handler) setQuietEnabled(ctx context.Context, phone string, enabled bool) string {
@@ -204,22 +214,23 @@ func (h *Handler) setQuietEnabled(ctx context.Context, phone string, enabled boo
 }
 
 func (h *Handler) why(ctx context.Context, phone string, id int) string {
-	var explain string
 	var title string
+	var features []string
+	var explain string
 	found := false
 	_ = h.store.View(ctx, phone, func(d *state.Data) {
 		if sug, ok := d.Suggestions[strconv.Itoa(id)]; ok {
 			found = true
 			title = sug.Title
-			if sug.Explain != "" {
-				explain = sug.Explain
-			} else {
-				explain = h.scorer.Explain(ctx, phone, sug.Features)
-			}
+			features = append([]string(nil), sug.Features...)
+			explain = sug.Explain
 		}
 	})
 	if !found {
 		return fmt.Sprintf("No suggestion #%d found.", id)
+	}
+	if explain == "" {
+		explain = h.scorer.Explain(ctx, phone, features)
 	}
 	return fmt.Sprintf("#%d %s\n%s", id, title, explain)
 }
@@ -453,8 +464,12 @@ func formatSubs(subcategories map[string][]string) string {
 	return strings.Join(parts, "; ")
 }
 
+func (h *Handler) setPausedState(ctx context.Context, phone string, paused bool) error {
+	return h.store.Update(ctx, phone, func(d *state.Data) { d.Paused = paused })
+}
+
 func (h *Handler) setPaused(ctx context.Context, phone string, paused bool) string {
-	if err := h.store.Update(ctx, phone, func(d *state.Data) { d.Paused = paused }); err != nil {
+	if err := h.setPausedState(ctx, phone, paused); err != nil {
 		return "Something went wrong, try again."
 	}
 	if paused {

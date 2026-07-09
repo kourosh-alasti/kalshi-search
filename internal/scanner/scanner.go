@@ -92,11 +92,7 @@ func (s *Scanner) Run(ctx context.Context) {
 			s.healthy(false)
 			metrics.ObserveScan(s.cfg.ScanCycleTimeout, 0, false)
 			if s.stats != nil && timedOut {
-				snap := s.stats.Get()
-				snap.CycleTimedOut = true
-				snap.LastError = err.Error()
-				snap.Healthy = false
-				s.stats.Update(snap)
+				s.stats.RecordCycle(0, 0, 0, s.cfg.ScanCycleTimeout, false, err.Error(), true)
 			}
 		} else {
 			s.healthy(true)
@@ -160,7 +156,7 @@ func (s *Scanner) cycle(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("fetching events: %w", err)
 	}
-	if err := s.refreshSeriesTags(events); err != nil {
+	if err := s.refreshSeriesTags(ctx, events); err != nil {
 		s.logger.Warn("series tag refresh failed", "error", err)
 	}
 
@@ -184,19 +180,12 @@ func (s *Scanner) cycle(ctx context.Context) error {
 	metrics.ObserveScan(dur, len(events), true)
 
 	if s.stats != nil {
-		pending, _ := s.inbound.PendingCount(ctx)
-		snap := s.stats.Get()
-		snap.Healthy = true
-		snap.LastCycleAt = time.Now()
-		snap.LastCycleMS = dur.Milliseconds()
-		snap.EventsFetched = len(events)
-		snap.UsersScanned = len(s.cfg.AlertRecipients)
-		snap.AlertsSent = alertsSent
-		snap.LastError = ""
-		snap.InboundPending = pending
-		snap.IsLeader = s.isLeader()
-		snap.CycleTimedOut = false
-		s.stats.Update(snap)
+		s.stats.RecordCycle(len(events), len(s.cfg.AlertRecipients), alertsSent, dur, true, "", false)
+		if s.inbound != nil {
+			if pending, err := s.inbound.PendingCount(ctx); err == nil {
+				s.stats.SetInboundPending(pending)
+			}
+		}
 	}
 	return nil
 }
@@ -210,7 +199,14 @@ func (s *Scanner) processInbound(ctx context.Context) error {
 		return err
 	}
 	for _, m := range msgs {
-		s.cmds.Handle(ctx, m.Phone, m.Body)
+		if err := s.cmds.Handle(ctx, m.Phone, m.Body); err != nil {
+			s.logger.Warn("inbound command failed", "id", m.ID, "error", err)
+			if markErr := s.inbound.MarkFailed(ctx, m.ID, err.Error()); markErr != nil {
+				s.logger.Warn("marking inbound failed", "id", m.ID, "error", markErr)
+			}
+			metrics.InboundProcessed.WithLabelValues("error").Inc()
+			continue
+		}
 		if err := s.inbound.MarkDone(ctx, m.ID); err != nil {
 			s.logger.Warn("marking inbound done failed", "id", m.ID, "error", err)
 			metrics.InboundProcessed.WithLabelValues("error").Inc()
@@ -218,9 +214,10 @@ func (s *Scanner) processInbound(ctx context.Context) error {
 			metrics.InboundProcessed.WithLabelValues("ok").Inc()
 		}
 	}
-	if s.stats != nil {
-		n, _ := s.inbound.PendingCount(ctx)
-		s.stats.SetInboundPending(n)
+	if s.stats != nil && s.inbound != nil {
+		if n, err := s.inbound.PendingCount(ctx); err == nil {
+			s.stats.SetInboundPending(n)
+		}
 	}
 	return nil
 }
@@ -310,10 +307,10 @@ func (s *Scanner) cycleForUser(ctx context.Context, phone string, events []kalsh
 				HasPosition:    knownPositions[m.Ticker],
 			}
 			feats := learning.ExtractFeatures(ev, m, now, featCtx)
-			score := s.scorer.Score(ctx, phone, feats)
+			score, explain := s.scorer.ScoreAndExplain(ctx, phone, feats)
 			candidates = append(candidates, candidate{
 				event: ev, market: m, features: feats, score: score,
-				explain: s.scorer.Explain(ctx, phone, feats), watch: isWatch,
+				explain: explain, watch: isWatch,
 			})
 		}
 	}
@@ -470,8 +467,10 @@ func (s *Scanner) alert(ctx context.Context, phone string, candidates []candidat
 	now := time.Now()
 	var lines []string
 	type pendingSug struct {
-		sug    *state.Suggestion
-		record learning.SuggestionRecord
+		sug        *state.Suggestion
+		record     learning.SuggestionRecord
+		closeHours float64
+		volume     int
 	}
 	var pending []pendingSug
 
@@ -504,34 +503,34 @@ func (s *Scanner) alert(ctx context.Context, phone string, candidates []candidat
 				Volume: c.market.Volume, OpenInterest: c.market.OpenInterest,
 				CloseTime: c.market.CloseTime, Features: c.features, Score: c.score,
 			},
+			closeHours: c.market.CloseTime.Sub(now).Hours(),
+			volume:     c.market.Volume,
 		})
 	}
 
 	body := s.alertBody(phone, strings.Join(lines, "\n\n"))
 	if err := s.sms.SendSMS(ctx, phone, body); err != nil {
+		ids := make([]int, len(pending))
+		for i, p := range pending {
+			ids[i] = p.sug.ID
+		}
+		_ = s.store.Update(ctx, phone, func(d *state.Data) {
+			for _, id := range ids {
+				delete(d.Suggestions, fmt.Sprint(id))
+			}
+			if len(ids) > 0 && d.NextSuggestionID > ids[0] {
+				d.NextSuggestionID = ids[0]
+			}
+		})
 		return fmt.Errorf("sending alert to %s: %w", phone, err)
 	}
 
 	for _, p := range pending {
-		closeHours := 0.0
-		for _, c := range candidates {
-			if c.market.Ticker == p.sug.Ticker {
-				closeHours = c.market.CloseTime.Sub(now).Hours()
-				break
-			}
-		}
-		var vol int
-		for _, c := range candidates {
-			if c.market.Ticker == p.sug.Ticker {
-				vol = c.market.Volume
-				break
-			}
-		}
 		_ = s.store.Update(ctx, phone, func(d *state.Data) {
 			d.Alerted[p.sug.Ticker] = &state.AlertedMarket{
 				Ticker: p.sug.Ticker, LastPriceCents: p.sug.PriceCents,
 				LastAlertedAt: now, SuggestionID: p.sug.ID,
-				LastVolume: vol, LastCloseHours: closeHours,
+				LastVolume: p.volume, LastCloseHours: p.closeHours,
 			}
 		})
 		s.sugLog.Append(ctx, phone, p.record)
@@ -709,15 +708,15 @@ func TagsForCategories(categories []string, tagsByCategory map[string][]string) 
 	return out
 }
 
-func (s *Scanner) refreshSeriesTags(events []kalshi.Event) error {
-	if !s.anyUserNeedsSubcategoryTags() {
+func (s *Scanner) refreshSeriesTags(ctx context.Context, events []kalshi.Event) error {
+	if !s.anyUserNeedsSubcategoryTags(ctx) {
 		return nil
 	}
 	const cacheTTL = time.Hour
 	if time.Since(s.seriesTagsAt) < cacheTTL && len(s.seriesTags) > 0 {
 		return nil
 	}
-	refreshCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	series, err := s.kalshi.ListSeries(refreshCtx)
 	if err != nil {
@@ -741,12 +740,12 @@ func (s *Scanner) refreshSeriesTags(events []kalshi.Event) error {
 	return nil
 }
 
-func (s *Scanner) anyUserNeedsSubcategoryTags() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (s *Scanner) anyUserNeedsSubcategoryTags(ctx context.Context) bool {
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	for _, recipient := range s.cfg.AlertRecipients {
 		var subs map[string][]string
-		if err := s.store.View(ctx, recipient, func(d *state.Data) { subs = d.Subcategories }); err != nil {
+		if err := s.store.View(checkCtx, recipient, func(d *state.Data) { subs = d.Subcategories }); err != nil {
 			continue
 		}
 		for _, tags := range subs {

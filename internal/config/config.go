@@ -284,7 +284,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg.LinkSigningSecret = os.Getenv("LINK_SIGNING_SECRET")
-	if cfg.LinkSigningSecret == "" {
+	if cfg.LinkSigningSecret == "" && isLocalLibSQL(cfg.LibSQLURL) {
 		cfg.LinkSigningSecret = cfg.LibSQLAuthToken
 	}
 	cfg.InstanceID = os.Getenv("INSTANCE_ID")
@@ -301,7 +301,7 @@ func Load() (*Config, error) {
 		errs = append(errs, "MAX_PRICE_CENTS must be between 1 and 99")
 	}
 	if cfg.Enabled && cfg.LinkSigningSecret == "" {
-		errs = append(errs, "LINK_SIGNING_SECRET or LIBSQL_AUTH_TOKEN is required for signed action links")
+		errs = append(errs, "LINK_SIGNING_SECRET is required when ENABLED=true")
 	}
 
 	switch strings.ToLower(getEnv("LOG_LEVEL", "info")) {
@@ -440,6 +440,10 @@ func getEnvBool(key string, def bool) (bool, error) {
 		return false, fmt.Errorf("%s must be a boolean, got %q", key, v)
 	}
 	return b, nil
+}
+
+func isLocalLibSQL(url string) bool {
+	return strings.Contains(url, "127.0.0.1") || strings.Contains(url, "localhost")
 }
 
 func getEnvDuration(key string, def time.Duration) (time.Duration, error) {

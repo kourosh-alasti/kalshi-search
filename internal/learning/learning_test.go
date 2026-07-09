@@ -1,12 +1,10 @@
 package learning
 
 import (
-	"context"
 	"testing"
+	"time"
 
 	"github.com/kourosh/kalshi-search/internal/kalshi"
-	"github.com/kourosh/kalshi-search/internal/state"
-	"time"
 )
 
 func TestExtractFeaturesRich(t *testing.T) {
@@ -22,14 +20,23 @@ func TestExtractFeaturesRich(t *testing.T) {
 	}
 }
 
-func TestCounterScorerScore(t *testing.T) {
-	// In-memory isn't available; test scoring math via featureRates logic
-	features := []string{"category:sports", "price_band:11-20"}
-	if len(features) != 2 {
-		t.Fatal("setup")
+func TestExplainFromContribs(t *testing.T) {
+	contribs := []FeatureContribution{
+		{Feature: "category:sports", Rate: 0.8},
+		{Feature: "price_band:11-20", Rate: 0.5},
 	}
-	_ = state.Data{}
-	_ = context.Background()
+	msg := explainFromContribs(contribs, 0.65)
+	if msg == "" || msg == "neutral match (65%)" {
+		t.Fatalf("expected strong-category explanation, got %q", msg)
+	}
+}
+
+func TestFeatureRateMath(t *testing.T) {
+	accepts, rejects := 3, 1
+	rate := (float64(accepts) + 1) / (float64(accepts+rejects) + 2)
+	if rate < 0.66 || rate > 0.68 {
+		t.Fatalf("unexpected laplace rate: %f", rate)
+	}
 }
 
 func TestFriendlyFeature(t *testing.T) {

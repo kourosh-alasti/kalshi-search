@@ -70,13 +70,23 @@ func (e *Elector) TryAcquire(ctx context.Context) (bool, error) {
 	}
 
 	if holder == e.instanceID || time.Now().After(exp) {
-		_, err = tx.ExecContext(ctx, `
+		res, err := tx.ExecContext(ctx, `
 			UPDATE scanner_locks SET holder_id = ?, expires_at = ?, updated_at = ?
 			WHERE lock_name = ? AND (holder_id = ? OR expires_at < ?)`,
 			e.instanceID, expires, now.Format(time.RFC3339Nano), lockName,
 			e.instanceID, now.Format(time.RFC3339Nano))
 		if err != nil {
 			return false, err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return false, err
+		}
+		if affected == 0 {
+			if err := tx.Commit(); err != nil {
+				return false, err
+			}
+			return false, nil
 		}
 		if err := tx.Commit(); err != nil {
 			return false, err

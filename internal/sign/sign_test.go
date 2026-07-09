@@ -1,6 +1,9 @@
 package sign
 
 import (
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,38 +14,27 @@ func TestFeedbackRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := s.FeedbackURL("https://app.example.com", "+14155551234", 7, "took", time.Hour)
-	// /feedback/{user}/7?action=took&exp=...&sig=...
-	const prefix = "https://app.example.com/feedback/"
-	if len(link) <= len(prefix) {
-		t.Fatalf("unexpected link: %s", link)
+
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
 	}
-	rest := link[len(prefix):]
-	slash := 0
-	for i, c := range rest {
-		if c == '/' {
-			slash = i
-			break
-		}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/feedback/"), "/")
+	if len(parts) != 2 {
+		t.Fatalf("unexpected path: %s", u.Path)
 	}
-	userEnc := rest[:slash]
-	// parse query manually
-	qIdx := len(link) - 1
-	for i := len(link) - 1; i >= 0; i-- {
-		if link[i] == '?' {
-			qIdx = i
-			break
-		}
+	userEnc := parts[0]
+	suggestionID, err := strconv.Atoi(parts[1])
+	if err != nil || suggestionID != 7 {
+		t.Fatalf("unexpected suggestion id in path: %s", parts[1])
 	}
-	query := link[qIdx+1:]
-	vals := map[string]string{}
-	for _, part := range splitQuery(query) {
-		kv := splitKV(part)
-		if len(kv) == 2 {
-			vals[kv[0]] = kv[1]
-		}
+
+	q := u.Query()
+	exp, err := strconv.ParseInt(q.Get("exp"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
 	}
-	exp, _ := parseInt64(vals["exp"])
-	user, err := s.VerifyFeedback(userEnc, 7, vals["action"], exp, vals["sig"])
+	user, err := s.VerifyFeedback(userEnc, suggestionID, q.Get("action"), exp, q.Get("sig"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,44 +43,28 @@ func TestFeedbackRoundTrip(t *testing.T) {
 	}
 }
 
-func splitQuery(s string) []string {
-	var out []string
-	cur := ""
-	for _, c := range s {
-		if c == '&' {
-			out = append(out, cur)
-			cur = ""
-			continue
-		}
-		cur += string(c)
-	}
-	if cur != "" {
-		out = append(out, cur)
-	}
-	return out
-}
-
-func splitKV(s string) []string {
-	for i, c := range s {
-		if c == '=' {
-			return []string{s[:i], s[i+1:]}
-		}
-	}
-	return []string{s}
-}
-
-func parseInt64(s string) (int64, error) {
-	var n int64
-	for _, c := range s {
-		n = n*10 + int64(c-'0')
-	}
-	return n, nil
-}
-
 func TestToggleRoundTrip(t *testing.T) {
-	s, _ := New("secret")
+	s, err := New("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
 	link := s.ToggleURL("https://x.com", "a@b.com", "enable", time.Hour)
-	if link == "" {
-		t.Fatal("empty link")
+
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userEnc := strings.TrimPrefix(u.Path, "/toggle/")
+	q := u.Query()
+	exp, err := strconv.ParseInt(q.Get("exp"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.VerifyToggle(userEnc, q.Get("action"), exp, q.Get("sig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user != "a@b.com" {
+		t.Fatalf("got user %q", user)
 	}
 }
