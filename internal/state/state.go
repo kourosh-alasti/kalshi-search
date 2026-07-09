@@ -20,10 +20,38 @@ type SuggestionLabel string
 
 const (
 	LabelPending  SuggestionLabel = "pending"
-	LabelTook     SuggestionLabel = "took"     // explicit TOOK reply
-	LabelPass     SuggestionLabel = "pass"     // explicit PASS reply
-	LabelPosition SuggestionLabel = "position" // detected via portfolio positions
+	LabelTook     SuggestionLabel = "took"
+	LabelPass     SuggestionLabel = "pass"
+	LabelPosition SuggestionLabel = "position"
 )
+
+// FilterOverrides holds per-user scanner filter overrides (nil = use global default).
+type FilterOverrides struct {
+	MaxPriceCents    *int `json:"max_price_cents,omitempty"`
+	MinVolume        *int `json:"min_volume,omitempty"`
+	MinOpenInterest  *int `json:"min_open_interest,omitempty"`
+	CloseWithinHours *int `json:"close_within_hours,omitempty"`
+}
+
+// QuietHours defines when alerts are held unless the user disables the feature.
+type QuietHours struct {
+	Enabled   bool   `json:"enabled"`
+	StartHour int    `json:"start_hour"`
+	EndHour   int    `json:"end_hour"`
+	Timezone  string `json:"timezone"`
+}
+
+// DefaultQuietHours returns sensible defaults (10pm–8am US Eastern).
+func DefaultQuietHours() QuietHours {
+	return QuietHours{Enabled: false, StartHour: 22, EndHour: 8, Timezone: "America/New_York"}
+}
+
+// WatchItem is a user-requested ticker alert.
+type WatchItem struct {
+	Ticker         string    `json:"ticker"`
+	MaxPriceCents  int       `json:"max_price_cents"`
+	CreatedAt      time.Time `json:"created_at"`
+}
 
 // Suggestion is one alert we texted, awaiting or holding feedback.
 type Suggestion struct {
@@ -34,15 +62,20 @@ type Suggestion struct {
 	PriceCents int             `json:"price_cents"`
 	SentAt     time.Time       `json:"sent_at"`
 	Label      SuggestionLabel `json:"label"`
+	Score      float64         `json:"score"`
+	Explain    string          `json:"explain,omitempty"`
 }
 
 // AlertedMarket tracks dedup info per market ticker.
 type AlertedMarket struct {
-	Ticker         string    `json:"ticker"`
-	LastPriceCents int       `json:"last_price_cents"`
-	LastAlertedAt  time.Time `json:"last_alerted_at"`
-	Suppressed     bool      `json:"suppressed"` // PASSed markets never re-alert
-	SuggestionID   int       `json:"suggestion_id"`
+	Ticker          string    `json:"ticker"`
+	LastPriceCents  int       `json:"last_price_cents"`
+	LastAlertedAt   time.Time `json:"last_alerted_at"`
+	Suppressed      bool      `json:"suppressed"`
+	SuppressedUntil time.Time `json:"suppressed_until,omitempty"`
+	SuggestionID    int       `json:"suggestion_id"`
+	LastVolume      int       `json:"last_volume"`
+	LastCloseHours  float64   `json:"last_close_hours"`
 }
 
 // FeatureStats holds accept/reject counts for one learned feature.
@@ -56,9 +89,12 @@ type Data struct {
 	Onboarded        bool                      `json:"onboarded"`
 	Paused           bool                      `json:"paused"`
 	Categories       []string                  `json:"categories"`
-	Subcategories    map[string][]string       `json:"subcategories"`     // category -> selected tags
+	Subcategories    map[string][]string       `json:"subcategories"`
 	CategoryMenu     []string                  `json:"category_menu"`
-	TagsByCategory   map[string][]string       `json:"tags_by_category"` // full subcategory menu
+	TagsByCategory   map[string][]string       `json:"tags_by_category"`
+	FilterOverrides  FilterOverrides           `json:"filter_overrides"`
+	QuietHours       QuietHours                `json:"quiet_hours"`
+	Watchlist        map[string]*WatchItem     `json:"watchlist"`
 	NextSuggestionID int                       `json:"next_suggestion_id"`
 	Suggestions      map[string]*Suggestion    `json:"suggestions"`
 	Alerted          map[string]*AlertedMarket `json:"alerted"`
@@ -68,9 +104,9 @@ type Data struct {
 
 // Store is a concurrency-safe libSQL-backed store scoped by phone number.
 type Store struct {
-	mu     sync.Mutex
 	db     *sql.DB
 	logger *slog.Logger
+	locks  sync.Map // phone -> *sync.Mutex
 }
 
 // Open wraps an existing libSQL connection.
@@ -79,6 +115,11 @@ func Open(db *sql.DB, logger *slog.Logger) *Store {
 		db:     db,
 		logger: logger.With("component", "state"),
 	}
+}
+
+func (s *Store) userLock(phone string) *sync.Mutex {
+	v, _ := s.locks.LoadOrStore(phone, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // EnsureUser creates a user row for phone if it does not exist yet.
@@ -97,8 +138,9 @@ func (s *Store) EnsureUser(ctx context.Context, phone string) error {
 
 // Update runs fn with exclusive access to the user's state and persists afterwards.
 func (s *Store) Update(ctx context.Context, phone string, fn func(*Data)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := s.userLock(phone)
+	mu.Lock()
+	defer mu.Unlock()
 
 	if err := s.ensureUserLocked(ctx, phone); err != nil {
 		return err
@@ -108,13 +150,15 @@ func (s *Store) Update(ctx context.Context, phone string, fn func(*Data)) error 
 		return err
 	}
 	fn(data)
+	pruneSuggestions(data, 200)
 	return s.saveLocked(ctx, phone, data)
 }
 
 // View runs fn with read access to the user's state.
 func (s *Store) View(ctx context.Context, phone string, fn func(*Data)) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := s.userLock(phone)
+	mu.Lock()
+	defer mu.Unlock()
 
 	if err := s.ensureUserLocked(ctx, phone); err != nil {
 		return err
@@ -138,42 +182,49 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		Alerted:          map[string]*AlertedMarket{},
 		Features:         map[string]*FeatureStats{},
 		KnownPositions:   map[string]bool{},
+		Watchlist:        map[string]*WatchItem{},
+		QuietHours:       DefaultQuietHours(),
 	}
 
-	var menuJSON, catsJSON, tagsJSON, subsJSON string
+	var menuJSON, catsJSON, tagsJSON, subsJSON, filtersJSON, quietJSON string
 	var onboarded, paused int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT onboarded, paused, category_menu, categories, tags_by_category, subcategories, next_suggestion_id
+		SELECT onboarded, paused, category_menu, categories, tags_by_category, subcategories,
+			filter_overrides, quiet_hours, next_suggestion_id
 		FROM users WHERE phone = ?`, phone).Scan(
-		&onboarded, &paused, &menuJSON, &catsJSON, &tagsJSON, &subsJSON, &data.NextSuggestionID)
+		&onboarded, &paused, &menuJSON, &catsJSON, &tagsJSON, &subsJSON,
+		&filtersJSON, &quietJSON, &data.NextSuggestionID)
 	if err != nil {
 		return nil, fmt.Errorf("loading user %s: %w", phone, err)
 	}
 	data.Onboarded = onboarded != 0
 	data.Paused = paused != 0
-	if err := json.Unmarshal([]byte(menuJSON), &data.CategoryMenu); err != nil {
-		return nil, fmt.Errorf("decoding category_menu for %s: %w", phone, err)
-	}
-	if err := json.Unmarshal([]byte(catsJSON), &data.Categories); err != nil {
-		return nil, fmt.Errorf("decoding categories for %s: %w", phone, err)
-	}
+	decodeJSON(menuJSON, &data.CategoryMenu)
+	decodeJSON(catsJSON, &data.Categories)
 	if tagsJSON == "" {
 		tagsJSON = "{}"
 	}
-	if err := json.Unmarshal([]byte(tagsJSON), &data.TagsByCategory); err != nil {
-		return nil, fmt.Errorf("decoding tags_by_category for %s: %w", phone, err)
-	}
+	decodeJSON(tagsJSON, &data.TagsByCategory)
 	if subsJSON == "" {
 		subsJSON = "{}"
 	}
-	if err := json.Unmarshal([]byte(subsJSON), &data.Subcategories); err != nil {
-		return nil, fmt.Errorf("decoding subcategories for %s: %w", phone, err)
+	decodeJSON(subsJSON, &data.Subcategories)
+	if filtersJSON == "" {
+		filtersJSON = "{}"
 	}
+	decodeJSON(filtersJSON, &data.FilterOverrides)
+	if quietJSON == "" {
+		quietJSON = `{"enabled":false,"start_hour":22,"end_hour":8,"timezone":"America/New_York"}`
+	}
+	decodeJSON(quietJSON, &data.QuietHours)
 	if data.TagsByCategory == nil {
 		data.TagsByCategory = map[string][]string{}
 	}
 	if data.Subcategories == nil {
 		data.Subcategories = map[string][]string{}
+	}
+	if data.QuietHours.Timezone == "" {
+		data.QuietHours.Timezone = "America/New_York"
 	}
 
 	rows, err := s.db.QueryContext(ctx, `
@@ -190,9 +241,7 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 			&sug.PriceCents, &sentAt, &label); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(featuresJSON), &sug.Features); err != nil {
-			return nil, fmt.Errorf("decoding suggestion features: %w", err)
-		}
+		decodeJSON(featuresJSON, &sug.Features)
 		sug.SentAt, err = time.Parse(time.RFC3339Nano, sentAt)
 		if err != nil {
 			return nil, fmt.Errorf("decoding suggestion sent_at: %w", err)
@@ -205,7 +254,8 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	}
 
 	rows, err = s.db.QueryContext(ctx, `
-		SELECT ticker, last_price_cents, last_alerted_at, suppressed, suggestion_id
+		SELECT ticker, last_price_cents, last_alerted_at, suppressed, suggestion_id,
+			suppressed_until, last_volume, last_close_hours
 		FROM alerted_markets WHERE phone = ?`, phone)
 	if err != nil {
 		return nil, fmt.Errorf("loading alerted markets for %s: %w", phone, err)
@@ -215,7 +265,9 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		var am AlertedMarket
 		var alertedAt string
 		var suppressed int
-		if err := rows.Scan(&am.Ticker, &am.LastPriceCents, &alertedAt, &suppressed, &am.SuggestionID); err != nil {
+		var suppressedUntil sql.NullString
+		if err := rows.Scan(&am.Ticker, &am.LastPriceCents, &alertedAt, &suppressed, &am.SuggestionID,
+			&suppressedUntil, &am.LastVolume, &am.LastCloseHours); err != nil {
 			return nil, err
 		}
 		am.LastAlertedAt, err = time.Parse(time.RFC3339Nano, alertedAt)
@@ -223,6 +275,9 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 			return nil, fmt.Errorf("decoding alerted_at: %w", err)
 		}
 		am.Suppressed = suppressed != 0
+		if suppressedUntil.Valid && suppressedUntil.String != "" {
+			am.SuppressedUntil, _ = time.Parse(time.RFC3339Nano, suppressedUntil.String)
+		}
 		data.Alerted[am.Ticker] = &am
 	}
 	if err := rows.Err(); err != nil {
@@ -264,29 +319,46 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 		return nil, err
 	}
 
+	rows, err = s.db.QueryContext(ctx, `
+		SELECT ticker, max_price_cents, created_at FROM watchlist WHERE phone = ?`, phone)
+	if err != nil {
+		return nil, fmt.Errorf("loading watchlist for %s: %w", phone, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item WatchItem
+		var created string
+		if err := rows.Scan(&item.Ticker, &item.MaxPriceCents, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		data.Watchlist[item.Ticker] = &item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	s.logger.Debug("user state loaded", "phone", phone,
 		"onboarded", data.Onboarded, "categories", len(data.Categories),
-		"suggestions", len(data.Suggestions), "alerted_markets", len(data.Alerted))
+		"suggestions", len(data.Suggestions), "alerted_markets", len(data.Alerted),
+		"watchlist", len(data.Watchlist))
 	return data, nil
 }
 
+func decodeJSON(src string, dest any) {
+	if src == "" || src == "null" {
+		return
+	}
+	_ = json.Unmarshal([]byte(src), dest)
+}
+
 func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
-	menuJSON, err := json.Marshal(d.CategoryMenu)
-	if err != nil {
-		return err
-	}
-	catsJSON, err := json.Marshal(d.Categories)
-	if err != nil {
-		return err
-	}
-	tagsJSON, err := json.Marshal(d.TagsByCategory)
-	if err != nil {
-		return err
-	}
-	subsJSON, err := json.Marshal(d.Subcategories)
-	if err != nil {
-		return err
-	}
+	menuJSON, _ := json.Marshal(d.CategoryMenu)
+	catsJSON, _ := json.Marshal(d.Categories)
+	tagsJSON, _ := json.Marshal(d.TagsByCategory)
+	subsJSON, _ := json.Marshal(d.Subcategories)
+	filtersJSON, _ := json.Marshal(d.FilterOverrides)
+	quietJSON, _ := json.Marshal(d.QuietHours)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -299,16 +371,17 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 		UPDATE users SET
 			onboarded = ?, paused = ?, category_menu = ?, categories = ?,
 			tags_by_category = ?, subcategories = ?,
+			filter_overrides = ?, quiet_hours = ?,
 			next_suggestion_id = ?, updated_at = ?
 		WHERE phone = ?`,
 		boolInt(d.Onboarded), boolInt(d.Paused), string(menuJSON), string(catsJSON),
-		string(tagsJSON), string(subsJSON),
+		string(tagsJSON), string(subsJSON), string(filtersJSON), string(quietJSON),
 		d.NextSuggestionID, now, phone)
 	if err != nil {
 		return fmt.Errorf("updating user %s: %w", phone, err)
 	}
 
-	for _, table := range []string{"suggestions", "alerted_markets", "feature_stats", "known_positions"} {
+	for _, table := range []string{"suggestions", "alerted_markets", "feature_stats", "known_positions", "watchlist"} {
 		_, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE phone = ?", phone)
 		if err != nil {
 			return fmt.Errorf("clearing %s for %s: %w", table, phone, err)
@@ -316,10 +389,7 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 	}
 
 	for _, sug := range d.Suggestions {
-		featuresJSON, err := json.Marshal(sug.Features)
-		if err != nil {
-			return err
-		}
+		featuresJSON, _ := json.Marshal(sug.Features)
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO suggestions (phone, id, ticker, title, features, price_cents, sent_at, label)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -331,11 +401,16 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 	}
 
 	for _, am := range d.Alerted {
+		var suppressedUntil sql.NullString
+		if !am.SuppressedUntil.IsZero() {
+			suppressedUntil = sql.NullString{String: am.SuppressedUntil.UTC().Format(time.RFC3339Nano), Valid: true}
+		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO alerted_markets (phone, ticker, last_price_cents, last_alerted_at, suppressed, suggestion_id)
-			VALUES (?, ?, ?, ?, ?, ?)`,
+			INSERT INTO alerted_markets (phone, ticker, last_price_cents, last_alerted_at, suppressed,
+				suggestion_id, suppressed_until, last_volume, last_close_hours)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			phone, am.Ticker, am.LastPriceCents, am.LastAlertedAt.UTC().Format(time.RFC3339Nano),
-			boolInt(am.Suppressed), am.SuggestionID)
+			boolInt(am.Suppressed), am.SuggestionID, suppressedUntil, am.LastVolume, am.LastCloseHours)
 		if err != nil {
 			return fmt.Errorf("inserting alerted market %s: %w", am.Ticker, err)
 		}
@@ -360,11 +435,52 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 		}
 	}
 
+	for _, item := range d.Watchlist {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO watchlist (phone, ticker, max_price_cents, created_at)
+			VALUES (?, ?, ?, ?)`,
+			phone, item.Ticker, item.MaxPriceCents, item.CreatedAt.UTC().Format(time.RFC3339Nano))
+		if err != nil {
+			return fmt.Errorf("inserting watchlist %s: %w", item.Ticker, err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing user state for %s: %w", phone, err)
 	}
 	s.logger.Debug("user state saved", "phone", phone)
 	return nil
+}
+
+func pruneSuggestions(d *Data, maxKeep int) {
+	if len(d.Suggestions) <= maxKeep {
+		return
+	}
+	type entry struct {
+		id  string
+		sug *Suggestion
+	}
+	var all []entry
+	for id, sug := range d.Suggestions {
+		if sug.Label == LabelPending {
+			continue
+		}
+		all = append(all, entry{id, sug})
+	}
+	if len(d.Suggestions)-len(all) <= maxKeep {
+		return
+	}
+	// Drop oldest labeled suggestions first.
+	for len(d.Suggestions) > maxKeep && len(all) > 0 {
+		oldest := 0
+		for i := 1; i < len(all); i++ {
+			if all[i].sug.SentAt.Before(all[oldest].sug.SentAt) {
+				oldest = i
+			}
+		}
+		delete(d.Suggestions, all[oldest].id)
+		all = append(all[:oldest], all[oldest+1:]...)
+	}
 }
 
 func boolInt(v bool) int {
@@ -384,10 +500,7 @@ type OnboardingToken struct {
 
 // CreateOnboardingToken generates and stores a single-use onboarding link token.
 func (s *Store) CreateOnboardingToken(ctx context.Context, phone string, ttl time.Duration) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := s.ensureUserLocked(ctx, phone); err != nil {
+	if err := s.EnsureUser(ctx, phone); err != nil {
 		return "", err
 	}
 
@@ -410,9 +523,6 @@ func (s *Store) CreateOnboardingToken(ctx context.Context, phone string, ttl tim
 
 // LookupOnboardingToken returns token metadata when the link is still valid.
 func (s *Store) LookupOnboardingToken(ctx context.Context, token string) (*OnboardingToken, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	var phone, expiresAt string
 	var used int
 	err := s.db.QueryRowContext(ctx, `
@@ -437,12 +547,30 @@ func (s *Store) LookupOnboardingToken(ctx context.Context, token string) (*Onboa
 
 // MarkOnboardingTokenUsed marks a token consumed after preferences are saved.
 func (s *Store) MarkOnboardingTokenUsed(ctx context.Context, token string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	_, err := s.db.ExecContext(ctx, `UPDATE onboarding_tokens SET used = 1 WHERE token = ?`, token)
 	if err != nil {
 		return fmt.Errorf("marking token used: %w", err)
 	}
 	return nil
+}
+
+// InQuietHours reports whether now falls in the user's configured quiet window.
+func InQuietHours(q QuietHours, now time.Time) bool {
+	if !q.Enabled {
+		return false
+	}
+	loc, err := time.LoadLocation(q.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+	local := now.In(loc)
+	hour := local.Hour()
+	start, end := q.StartHour, q.EndHour
+	if start == end {
+		return false
+	}
+	if start < end {
+		return hour >= start && hour < end
+	}
+	return hour >= start || hour < end
 }

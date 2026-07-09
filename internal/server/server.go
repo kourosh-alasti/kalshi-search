@@ -1,5 +1,4 @@
-// Package server exposes the HTTP endpoints: SMS webhook receivers and a health
-// check for Railway.
+// Package server exposes HTTP endpoints: webhooks, health, onboarding, and signed action links.
 package server
 
 import (
@@ -13,6 +12,10 @@ import (
 
 	"github.com/kourosh/kalshi-search/internal/commands"
 	"github.com/kourosh/kalshi-search/internal/config"
+	"github.com/kourosh/kalshi-search/internal/inbound"
+	"github.com/kourosh/kalshi-search/internal/metrics"
+	"github.com/kourosh/kalshi-search/internal/scanstats"
+	"github.com/kourosh/kalshi-search/internal/sign"
 	"github.com/kourosh/kalshi-search/internal/state"
 	"github.com/kourosh/kalshi-search/internal/telnyx"
 	"github.com/kourosh/kalshi-search/internal/twilio"
@@ -20,21 +23,23 @@ import (
 
 // Server holds HTTP handler state.
 type Server struct {
-	notifyChannel    string
-	telnyxPublicKey  string
-	twilioAuthToken  string
-	twilioWebhookURL string
+	notifyChannel     string
+	telnyxPublicKey   string
+	twilioAuthToken   string
+	twilioWebhookURL  string
 	allowedRecipients map[string]bool
-	handler          *commands.Handler
-	store            *state.Store
-	logger           *slog.Logger
-	healthy          atomic.Bool
+	handler           *commands.Handler
+	store             *state.Store
+	inbound           *inbound.Queue
+	signer            *sign.Signer
+	stats             *scanstats.Tracker
+	logger            *slog.Logger
+	healthy           atomic.Bool
 }
 
-// New creates the server. SMS commands are only accepted from alert recipients
-// when NOTIFY_CHANNEL=sms. Health starts true so Railway's initial check
-// passes before the first scan completes.
-func New(cfg *config.Config, handler *commands.Handler, store *state.Store, logger *slog.Logger) *Server {
+// New creates the server.
+func New(cfg *config.Config, handler *commands.Handler, store *state.Store, inboundQ *inbound.Queue,
+	signer *sign.Signer, stats *scanstats.Tracker, logger *slog.Logger) *Server {
 	allowed := make(map[string]bool, len(cfg.AlertRecipients))
 	for _, r := range cfg.AlertRecipients {
 		allowed[r] = true
@@ -47,6 +52,9 @@ func New(cfg *config.Config, handler *commands.Handler, store *state.Store, logg
 		allowedRecipients: allowed,
 		handler:           handler,
 		store:             store,
+		inbound:           inboundQ,
+		signer:            signer,
+		stats:             stats,
 		logger:            logger.With("component", "server"),
 	}
 	s.healthy.Store(true)
@@ -54,16 +62,26 @@ func New(cfg *config.Config, handler *commands.Handler, store *state.Store, logg
 }
 
 // SetHealthy updates the health flag reported by /healthz.
-func (s *Server) SetHealthy(ok bool) { s.healthy.Store(ok) }
+func (s *Server) SetHealthy(ok bool) {
+	s.healthy.Store(ok)
+	if s.stats != nil {
+		s.stats.SetHealthy(ok)
+	}
+}
 
 // Routes returns the HTTP mux.
-func (s *Server) Routes() *http.ServeMux {
+func (s *Server) Routes(metricsEnabled bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	if metricsEnabled {
+		mux.Handle("GET /metrics", metrics.Handler())
+	}
 	if s.notifyChannel == "sms" {
 		mux.HandleFunc("POST /webhooks/telnyx", s.handleTelnyxWebhook)
 		mux.HandleFunc("POST /webhooks/twilio", s.handleTwilioWebhook)
 	}
+	mux.HandleFunc("GET /feedback/{user}/{id}", s.handleFeedback)
+	mux.HandleFunc("GET /toggle/{user}", s.handleToggle)
 	mux.HandleFunc("GET /opt-in", staticHTML(optInPage))
 	mux.HandleFunc("GET /onboard/{token}", s.handleOnboardGet)
 	mux.HandleFunc("POST /onboard/{token}", s.handleOnboardPost)
@@ -84,15 +102,6 @@ func staticHTML(body string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(body))
 	}
-}
-
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	if !s.healthy.Load() {
-		http.Error(w, "last scan failed", http.StatusServiceUnavailable)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
 }
 
 func (s *Server) handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
@@ -126,26 +135,17 @@ func (s *Server) handleTelnyxWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acknowledge quickly (Telnyx requires a 2xx within 2 seconds); process
-	// the command asynchronously.
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"received":true}`))
 
 	if msg == nil {
-		s.logger.Debug("ignoring non-inbound webhook event")
 		return
 	}
 	if !s.allowedRecipients[msg.From] {
 		s.logger.Warn("ignoring inbound message from unknown recipient", "from", msg.From)
 		return
 	}
-
-	// The request context dies when this handler returns, so use a fresh one.
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		s.handler.Handle(ctx, msg.From, msg.Text)
-	}()
+	s.enqueueInbound(msg.From, msg.Text)
 }
 
 func (s *Server) handleTwilioWebhook(w http.ResponseWriter, r *http.Request) {
@@ -184,21 +184,30 @@ func (s *Server) handleTwilioWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Acknowledge quickly; process the command asynchronously.
 	w.WriteHeader(http.StatusOK)
 
 	if msg == nil {
-		s.logger.Debug("ignoring twilio webhook without inbound message fields")
 		return
 	}
 	if !s.allowedRecipients[msg.From] {
 		s.logger.Warn("ignoring inbound message from unknown recipient", "from", msg.From)
 		return
 	}
+	s.enqueueInbound(msg.From, msg.Text)
+}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		s.handler.Handle(ctx, msg.From, msg.Text)
-	}()
+func (s *Server) enqueueInbound(from, text string) {
+	if s.inbound == nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			s.handler.Handle(ctx, from, text)
+		}()
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.inbound.Enqueue(ctx, from, text); err != nil {
+		s.logger.Error("enqueue inbound failed", "error", err, "from", from)
+	}
 }

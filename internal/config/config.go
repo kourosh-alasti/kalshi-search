@@ -60,6 +60,17 @@ type Config struct {
 	// Learning.
 	MinSuggestionScore    float64
 	LearnExpandCategories bool
+	PassSuppressDays      int
+
+	// Worker tuning.
+	ScanCycleTimeout   time.Duration
+	EventsCacheTTL     time.Duration
+	MaxPerSeriesDigest int
+	LinkSigningSecret  string
+	LinkTTL            time.Duration
+	InstanceID         string
+	LeaderElection     bool
+	MetricsEnabled     bool
 
 	// Persistence (libSQL).
 	LibSQLURL       string
@@ -250,6 +261,37 @@ func Load() (*Config, error) {
 	if cfg.OnboardingTokenTTL, err = getEnvDuration("ONBOARDING_TOKEN_TTL", 24*time.Hour); err != nil {
 		errs = append(errs, err.Error())
 	}
+	if cfg.ScanCycleTimeout, err = getEnvDuration("SCAN_CYCLE_TIMEOUT", 4*time.Minute); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.EventsCacheTTL, err = getEnvDuration("EVENTS_CACHE_TTL", 30*time.Second); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.LinkTTL, err = getEnvDuration("LINK_TTL", 7*24*time.Hour); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.PassSuppressDays, err = getEnvInt("PASS_SUPPRESS_DAYS", 30); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.MaxPerSeriesDigest, err = getEnvInt("MAX_PER_SERIES_DIGEST", 2); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.LeaderElection, err = getEnvBool("LEADER_ELECTION", true); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.MetricsEnabled, err = getEnvBool("METRICS_ENABLED", true); err != nil {
+		errs = append(errs, err.Error())
+	}
+
+	cfg.LinkSigningSecret = os.Getenv("LINK_SIGNING_SECRET")
+	if cfg.LinkSigningSecret == "" {
+		cfg.LinkSigningSecret = cfg.LibSQLAuthToken
+	}
+	cfg.InstanceID = os.Getenv("INSTANCE_ID")
+	if cfg.InstanceID == "" {
+		host, _ := os.Hostname()
+		cfg.InstanceID = host + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
 
 	if cfg.PublicBaseURL == "" {
 		errs = append(errs, "PUBLIC_BASE_URL is required (e.g. https://your-app.up.railway.app)")
@@ -257,6 +299,9 @@ func Load() (*Config, error) {
 
 	if cfg.MaxPriceCents < 1 || cfg.MaxPriceCents > 99 {
 		errs = append(errs, "MAX_PRICE_CENTS must be between 1 and 99")
+	}
+	if cfg.Enabled && cfg.LinkSigningSecret == "" {
+		errs = append(errs, "LINK_SIGNING_SECRET or LIBSQL_AUTH_TOKEN is required for signed action links")
 	}
 
 	switch strings.ToLower(getEnv("LOG_LEVEL", "info")) {

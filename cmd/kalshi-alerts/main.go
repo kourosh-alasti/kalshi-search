@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -16,10 +17,15 @@ import (
 	"github.com/kourosh/kalshi-search/internal/config"
 	"github.com/kourosh/kalshi-search/internal/db"
 	"github.com/kourosh/kalshi-search/internal/email"
+	"github.com/kourosh/kalshi-search/internal/inbound"
 	"github.com/kourosh/kalshi-search/internal/kalshi"
+	"github.com/kourosh/kalshi-search/internal/leader"
 	"github.com/kourosh/kalshi-search/internal/learning"
+	"github.com/kourosh/kalshi-search/internal/metrics"
+	"github.com/kourosh/kalshi-search/internal/scanstats"
 	"github.com/kourosh/kalshi-search/internal/scanner"
 	"github.com/kourosh/kalshi-search/internal/server"
+	"github.com/kourosh/kalshi-search/internal/sign"
 	"github.com/kourosh/kalshi-search/internal/sms"
 	"github.com/kourosh/kalshi-search/internal/state"
 	"github.com/kourosh/kalshi-search/internal/telnyx"
@@ -37,15 +43,10 @@ func main() {
 	slog.SetDefault(logger)
 	logger.Info("starting kalshi-alerts",
 		"enabled", cfg.Enabled,
+		"instance_id", cfg.InstanceID,
+		"leader_election", cfg.LeaderElection,
 		"notify_channel", cfg.NotifyChannel,
-		"sms_provider", cfg.SMSProvider,
-		"poll_interval", cfg.PollInterval.String(),
-		"max_price_cents", cfg.MaxPriceCents,
-		"min_volume", cfg.MinVolume,
-		"min_open_interest", cfg.MinOpenInterest,
-		"close_within_hours", cfg.CloseWithinHours,
-		"libsql_url", cfg.LibSQLURL,
-		"log_level", cfg.LogLevel.String())
+		"poll_interval", cfg.PollInterval.String())
 
 	ctx := context.Background()
 	sqlDB, err := db.Open(ctx, cfg.LibSQLURL, cfg.LibSQLAuthToken)
@@ -88,11 +89,27 @@ func main() {
 		logger.Warn("scanner and notifications disabled (ENABLED=false)")
 	}
 
+	secret := cfg.LinkSigningSecret
+	if secret == "" && !cfg.Enabled {
+		secret = "disabled"
+	}
+	signer, err := sign.New(secret)
+	if err != nil {
+		logger.Error("creating link signer failed", "error", err)
+		os.Exit(1)
+	}
+
+	stats := &scanstats.Tracker{}
+	inboundQ := inbound.New(sqlDB, logger)
 	scorer := learning.NewCounterScorer(store, logger)
 	sugLog := learning.NewSuggestionLog(sqlDB, logger)
-	cmdHandler := commands.New(store, msgClient, scorer, sugLog, logger)
+	cmdHandler := commands.New(cfg, store, msgClient, scorer, sugLog, signer, logger)
 
-	srv := server.New(cfg, cmdHandler, store, logger)
+	var isLeader atomic.Bool
+	isLeader.Store(!cfg.LeaderElection)
+	isLeaderFn := func() bool { return isLeader.Load() }
+
+	srv := server.New(cfg, cmdHandler, store, inboundQ, signer, stats, logger)
 
 	var scan *scanner.Scanner
 	if cfg.Enabled {
@@ -101,15 +118,36 @@ func main() {
 			logger.Error("creating kalshi client failed", "error", err)
 			os.Exit(1)
 		}
-		scan = scanner.New(cfg, kalshiClient, msgClient, store, scorer, sugLog, logger, srv.SetHealthy)
+		scan = scanner.New(cfg, kalshiClient, msgClient, store, scorer, sugLog, inboundQ,
+			cmdHandler, signer, stats, logger, srv.SetHealthy, isLeaderFn)
 	}
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if cfg.MetricsEnabled {
+		metrics.Register()
+	}
+
+	if cfg.Enabled && cfg.LeaderElection {
+		elector := leader.New(sqlDB, cfg.InstanceID, 30*time.Second, logger)
+		go elector.RunLoop(runCtx, 10*time.Second, func(leader bool) {
+			isLeader.Store(leader)
+			metrics.LeaderGauge.Set(boolFloat(leader))
+			if stats != nil {
+				stats.SetLeader(leader)
+			}
+			if leader {
+				logger.Info("became scanner leader", "instance", cfg.InstanceID)
+			} else {
+				logger.Info("relinquished scanner leadership", "instance", cfg.InstanceID)
+			}
+		})
+	}
+
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           srv.Routes(),
+		Handler:           srv.Routes(cfg.MetricsEnabled),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -133,4 +171,11 @@ func main() {
 		logger.Error("http shutdown error", "error", err)
 	}
 	logger.Info("shutdown complete")
+}
+
+func boolFloat(v bool) float64 {
+	if v {
+		return 1
+	}
+	return 0
 }

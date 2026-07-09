@@ -1,44 +1,52 @@
 // Package learning implements the preference model that ranks candidate
 // trades based on the user's past accept/reject decisions.
-//
-// The initial implementation is a transparent counter-based scorer: each
-// market decomposes into categorical features, each feature accumulates
-// accept/reject counts, and a market's score is the mean of its features'
-// Laplace-smoothed accept rates. The Scorer interface is the seam for a
-// future ML-based implementation.
 package learning
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/kourosh/kalshi-search/internal/kalshi"
+	"github.com/kourosh/kalshi-search/internal/metrics"
 	"github.com/kourosh/kalshi-search/internal/state"
 )
 
-// Scorer scores candidate markets and consumes feedback. Implementations
-// must be safe to call from a single goroutine (the scanner loop).
+// Scorer scores candidate markets and consumes feedback.
 type Scorer interface {
-	// Score returns a preference score in [0, 1]; higher = more like trades
-	// the user has taken. Neutral prior is 0.5.
 	Score(ctx context.Context, phone string, features []string) float64
-	// Feed records one accept/reject decision for a set of features.
 	Feed(ctx context.Context, phone string, features []string, accepted bool)
 }
 
-// ExtractFeatures decomposes a market (and its parent event) into the
-// categorical features used for preference learning.
-func ExtractFeatures(event kalshi.Event, market kalshi.Market, now time.Time) []string {
-	return []string{
+// FeatureContext carries optional market context for richer features.
+type FeatureContext struct {
+	PrevPriceCents int
+	HasPosition    bool
+}
+
+// ExtractFeatures decomposes a market into categorical learning features.
+func ExtractFeatures(event kalshi.Event, market kalshi.Market, now time.Time, ctx FeatureContext) []string {
+	feats := []string{
 		"category:" + strings.ToLower(event.Category),
 		"series:" + event.SeriesTicker,
 		"price_band:" + priceBand(market.YesAsk),
 		"close_bucket:" + closeBucket(market.CloseTime.Sub(now)),
 		"volume_bucket:" + volumeBucket(market.Volume),
+		"spread_band:" + spreadBand(market.YesAsk, market.YesBid),
+		"vol24h_bucket:" + volume24hBucket(market.Volume24H),
 	}
+	if ctx.PrevPriceCents > 0 && market.YesAsk < ctx.PrevPriceCents {
+		feats = append(feats, "momentum:down")
+	} else if ctx.PrevPriceCents > 0 && market.YesAsk > ctx.PrevPriceCents {
+		feats = append(feats, "momentum:up")
+	}
+	if ctx.HasPosition {
+		feats = append(feats, "held:yes")
+	}
+	return feats
 }
 
 func priceBand(cents int) string {
@@ -78,40 +86,127 @@ func volumeBucket(v int) string {
 	}
 }
 
-// CounterScorer is the default Scorer backed by per-user feature stats in
-// the state store.
+func volume24hBucket(v int) string {
+	switch {
+	case v < 500:
+		return "<500"
+	case v < 5_000:
+		return "500-5k"
+	default:
+		return ">5k"
+	}
+}
+
+func spreadBand(ask, bid int) string {
+	spread := ask - bid
+	switch {
+	case spread <= 2:
+		return "tight"
+	case spread <= 5:
+		return "medium"
+	default:
+		return "wide"
+	}
+}
+
+// FeatureContribution is one feature's smoothed accept rate in a score.
+type FeatureContribution struct {
+	Feature string
+	Rate    float64
+}
+
+// CounterScorer is the default Scorer backed by per-user feature stats.
 type CounterScorer struct {
 	store  *state.Store
 	logger *slog.Logger
 }
 
-// NewCounterScorer returns a scorer reading and writing feature stats in the
-// given store.
+// NewCounterScorer returns a scorer reading and writing feature stats in the store.
 func NewCounterScorer(store *state.Store, logger *slog.Logger) *CounterScorer {
 	return &CounterScorer{store: store, logger: logger.With("component", "learning")}
 }
 
-// Score computes the mean Laplace-smoothed accept rate across features.
-// A feature with no history contributes the neutral prior 0.5.
-func (s *CounterScorer) Score(ctx context.Context, phone string, features []string) float64 {
+func (s *CounterScorer) featureRates(ctx context.Context, phone string, features []string) ([]FeatureContribution, float64) {
 	if len(features) == 0 {
-		return 0.5
+		return nil, 0.5
 	}
+	var contribs []FeatureContribution
 	var total float64
-	var contributions []string
 	_ = s.store.View(ctx, phone, func(d *state.Data) {
 		for _, f := range features {
 			rate := 0.5
 			if st, ok := d.Features[f]; ok {
 				rate = (float64(st.Accepts) + 1) / (float64(st.Accepts+st.Rejects) + 2)
 			}
+			contribs = append(contribs, FeatureContribution{Feature: f, Rate: rate})
 			total += rate
-			contributions = append(contributions, fmt.Sprintf("%s=%.2f", f, rate))
 		}
 	})
-	score := total / float64(len(features))
-	s.logger.Debug("scored market", "phone", phone, "score", fmt.Sprintf("%.3f", score), "contributions", contributions)
+	return contribs, total / float64(len(features))
+}
+
+// Score computes the mean Laplace-smoothed accept rate across features.
+func (s *CounterScorer) Score(ctx context.Context, phone string, features []string) float64 {
+	contribs, score := s.featureRates(ctx, phone, features)
+	var parts []string
+	for _, c := range contribs {
+		parts = append(parts, fmt.Sprintf("%s=%.2f", c.Feature, c.Rate))
+	}
+	s.logger.Debug("scored market", "phone", phone, "score", fmt.Sprintf("%.3f", score), "contributions", parts)
 	return score
+}
+
+// Explain returns a short human-readable rationale from top feature contributions.
+func (s *CounterScorer) Explain(ctx context.Context, phone string, features []string) string {
+	contribs, score := s.featureRates(ctx, phone, features)
+	if len(contribs) == 0 {
+		return fmt.Sprintf("neutral match (%.0f%%)", score*100)
+	}
+	sort.Slice(contribs, func(i, j int) bool {
+		deltaI := contribs[i].Rate - 0.5
+		deltaJ := contribs[j].Rate - 0.5
+		if deltaI < 0 {
+			deltaI = -deltaI
+		}
+		if deltaJ < 0 {
+			deltaJ = -deltaJ
+		}
+		return deltaI > deltaJ
+	})
+	top := contribs[0]
+	label := friendlyFeature(top.Feature)
+	if top.Rate >= 0.55 {
+		return fmt.Sprintf("fits your %s pattern (%.0f%%)", label, top.Rate*100)
+	}
+	if top.Rate <= 0.45 {
+		return fmt.Sprintf("weaker on %s (%.0f%%)", label, top.Rate*100)
+	}
+	return fmt.Sprintf("neutral %s (%.0f%%)", label, score*100)
+}
+
+func friendlyFeature(f string) string {
+	parts := strings.SplitN(f, ":", 2)
+	if len(parts) != 2 {
+		return f
+	}
+	switch parts[0] {
+	case "category":
+		return parts[1] + " markets"
+	case "series":
+		return parts[1] + " series"
+	case "price_band":
+		return parts[1] + "¢ range"
+	case "close_bucket":
+		return parts[1] + " close"
+	case "volume_bucket", "vol24h_bucket":
+		return parts[1] + " volume"
+	case "spread_band":
+		return parts[1] + " spread"
+	case "momentum":
+		return "price " + parts[1]
+	default:
+		return parts[1]
+	}
 }
 
 // Feed increments accept or reject counts for every feature.
@@ -136,9 +231,7 @@ func (s *CounterScorer) Feed(ctx context.Context, phone string, features []strin
 	s.logger.Info("feedback recorded", "phone", phone, "accepted", accepted, "features", features)
 }
 
-// SeriesBoost reports whether a series has been explicitly taken at least
-// twice — used to expand alerts beyond enabled categories when
-// LEARN_EXPAND_CATEGORIES is on.
+// SeriesBoost reports whether a series has been explicitly taken at least twice.
 func (s *CounterScorer) SeriesBoost(ctx context.Context, phone, seriesTicker string) bool {
 	boost := false
 	_ = s.store.View(ctx, phone, func(d *state.Data) {
@@ -147,4 +240,10 @@ func (s *CounterScorer) SeriesBoost(ctx context.Context, phone, seriesTicker str
 		}
 	})
 	return boost
+}
+
+// RecordFilterReason increments a Prometheus counter for filter telemetry.
+func RecordFilterReason(reason string) {
+	metrics.Register()
+	metrics.FilterReasons.WithLabelValues(reason).Inc()
 }
