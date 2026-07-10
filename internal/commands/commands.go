@@ -198,7 +198,8 @@ func (h *Handler) setEnhanced(ctx context.Context, phone string, enabled bool) s
 		return "Something went wrong, try again."
 	}
 	if enabled {
-		return "Enhanced suggestions ON. Picks will use ML ranking once you have enough TOOK/PASS feedback (8+ labels). Reply ENHANCED OFF to revert."
+		return fmt.Sprintf("Enhanced suggestions ON. Picks will use ML ranking once you have enough TOOK/PASS feedback (%d+ labels). Reply ENHANCED OFF to revert.",
+			h.cfg.MLMinTrainingExamples)
 	}
 	return "Enhanced suggestions OFF. Using standard preference ranking."
 }

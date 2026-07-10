@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 type trainingExample struct {
@@ -13,7 +14,7 @@ type trainingExample struct {
 }
 
 // LoadTrainingExamples returns labeled examples from suggestion_records for one user.
-func LoadTrainingExamples(ctx context.Context, db *sql.DB, phone string) ([]trainingExample, error) {
+func LoadTrainingExamples(ctx context.Context, db *sql.DB, phone string, logger *slog.Logger) ([]trainingExample, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT s.features, l.label
 		FROM suggestion_records s
@@ -36,6 +37,10 @@ func LoadTrainingExamples(ctx context.Context, db *sql.DB, phone string) ([]trai
 		var feats []string
 		if featuresJSON != "" {
 			if err := json.Unmarshal([]byte(featuresJSON), &feats); err != nil {
+				if logger != nil {
+					logger.Warn("skipping training example with invalid features JSON",
+						"phone", phone, "label", label, "error", err)
+				}
 				continue
 			}
 		}

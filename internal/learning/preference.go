@@ -45,12 +45,12 @@ func (p *PreferenceScorer) ScoreAndExplain(ctx context.Context, phone string, fe
 	if !p.enhancedEnabled(ctx, phone) {
 		return p.counter.ScoreAndExplain(ctx, phone, features)
 	}
-	mlScore := p.ml.Score(ctx, phone, features)
+	mlScore, mlExplain := p.ml.ScoreAndExplain(ctx, phone, features)
 	if mlScore < 0 {
 		score, explain := p.counter.ScoreAndExplain(ctx, phone, features)
 		return score, "enhanced on (learning) — " + explain
 	}
-	return mlScore, p.ml.Explain(ctx, phone, features)
+	return mlScore, mlExplain
 }
 
 // Explain returns rationale for the active model.
