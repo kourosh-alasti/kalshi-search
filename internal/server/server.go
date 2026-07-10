@@ -82,6 +82,7 @@ func (s *Server) Routes(metricsEnabled bool) *http.ServeMux {
 	}
 	mux.HandleFunc("GET /feedback/{user}/{id}", s.handleFeedback)
 	mux.HandleFunc("GET /toggle/{user}", s.handleToggle)
+	mux.HandleFunc("GET /enhanced/{user}", s.handleEnhanced)
 	mux.HandleFunc("GET /opt-in", staticHTML(optInPage))
 	mux.HandleFunc("GET /onboard/{token}", s.handleOnboardGet)
 	mux.HandleFunc("POST /onboard/{token}", s.handleOnboardPost)

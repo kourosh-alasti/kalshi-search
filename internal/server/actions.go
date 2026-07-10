@@ -97,3 +97,33 @@ func (s *Server) handleToggle(w http.ResponseWriter, r *http.Request) {
 	}
 	writeHTMLMessage(w, msg)
 }
+
+func (s *Server) handleEnhanced(w http.ResponseWriter, r *http.Request) {
+	userEnc := r.PathValue("user")
+	action := r.URL.Query().Get("action")
+	exp, _ := strconv.ParseInt(r.URL.Query().Get("exp"), 10, 64)
+	sig := r.URL.Query().Get("sig")
+
+	phone, err := s.signer.VerifyEnhanced(userEnc, action, exp, sig)
+	if err != nil {
+		http.Error(w, "invalid or expired link", http.StatusForbidden)
+		return
+	}
+	if !s.allowedRecipients[phone] {
+		http.Error(w, "unknown user", http.StatusForbidden)
+		return
+	}
+
+	enabled := strings.EqualFold(action, "on")
+	var msg string
+	if err := s.store.Update(r.Context(), phone, func(d *state.Data) {
+		d.EnhancedSuggestions = enabled
+	}); err != nil {
+		msg = "Something went wrong saving your preference. Please try again."
+	} else if enabled {
+		msg = "Enhanced suggestions enabled. Picks will use ML ranking once you have enough feedback."
+	} else {
+		msg = "Enhanced suggestions disabled."
+	}
+	writeHTMLMessage(w, msg)
+}

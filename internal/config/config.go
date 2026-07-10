@@ -61,6 +61,7 @@ type Config struct {
 	MinSuggestionScore    float64
 	LearnExpandCategories bool
 	PassSuppressDays      int
+	MLMinTrainingExamples int
 
 	// Worker tuning.
 	ScanCycleTimeout   time.Duration
@@ -271,6 +272,9 @@ func Load() (*Config, error) {
 		errs = append(errs, err.Error())
 	}
 	if cfg.PassSuppressDays, err = getEnvInt("PASS_SUPPRESS_DAYS", 30); err != nil {
+		errs = append(errs, err.Error())
+	}
+	if cfg.MLMinTrainingExamples, err = getEnvInt("ML_MIN_TRAINING_EXAMPLES", 8); err != nil {
 		errs = append(errs, err.Error())
 	}
 	if cfg.MaxPerSeriesDigest, err = getEnvInt("MAX_PER_SERIES_DIGEST", 2); err != nil {

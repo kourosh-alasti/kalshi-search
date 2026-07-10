@@ -126,6 +126,7 @@ var migrations = []string{
 	`ALTER TABLE alerted_markets ADD COLUMN suppressed_until TEXT`,
 	`ALTER TABLE alerted_markets ADD COLUMN last_volume INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE alerted_markets ADD COLUMN last_close_hours REAL NOT NULL DEFAULT 0`,
+	`ALTER TABLE users ADD COLUMN enhanced_suggestions INTEGER NOT NULL DEFAULT 0`,
 }
 
 // Open connects to libSQL and runs schema migrations.

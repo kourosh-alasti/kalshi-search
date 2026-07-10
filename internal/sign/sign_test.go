@@ -68,3 +68,29 @@ func TestToggleRoundTrip(t *testing.T) {
 		t.Fatalf("got user %q", user)
 	}
 }
+
+func TestEnhancedRoundTrip(t *testing.T) {
+	s, err := New("secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := s.EnhancedURL("https://x.com", "+14155551234", "on", time.Hour)
+
+	u, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userEnc := strings.TrimPrefix(u.Path, "/enhanced/")
+	q := u.Query()
+	exp, err := strconv.ParseInt(q.Get("exp"), 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := s.VerifyEnhanced(userEnc, q.Get("action"), exp, q.Get("sig"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user != "+14155551234" {
+		t.Fatalf("got user %q", user)
+	}
+}

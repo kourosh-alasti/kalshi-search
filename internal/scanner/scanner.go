@@ -28,7 +28,7 @@ type Scanner struct {
 	kalshi   *kalshi.Client
 	sms      sms.Client
 	store    *state.Store
-	scorer   *learning.CounterScorer
+	scorer   *learning.PreferenceScorer
 	sugLog   *learning.SuggestionLog
 	inbound  *inbound.Queue
 	cmds     *commands.Handler
@@ -47,7 +47,7 @@ type Scanner struct {
 
 // New wires up a scanner.
 func New(cfg *config.Config, kc *kalshi.Client, smsClient sms.Client, store *state.Store,
-	scorer *learning.CounterScorer, sugLog *learning.SuggestionLog, inboundQ *inbound.Queue,
+	scorer *learning.PreferenceScorer, sugLog *learning.SuggestionLog, inboundQ *inbound.Queue,
 	cmds *commands.Handler, signer *sign.Signer, stats *scanstats.Tracker,
 	logger *slog.Logger, healthy func(bool), isLeader func() bool) *Scanner {
 	return &Scanner{
@@ -640,11 +640,14 @@ func (s *Scanner) alertBody(phone, picks string) string {
 		if s.signer != nil {
 			enable := s.signer.ToggleURL(s.cfg.PublicBaseURL, phone, "enable", s.cfg.LinkTTL)
 			disable := s.signer.ToggleURL(s.cfg.PublicBaseURL, phone, "disable", s.cfg.LinkTTL)
+			enhOn := s.signer.EnhancedURL(s.cfg.PublicBaseURL, phone, "on", s.cfg.LinkTTL)
+			enhOff := s.signer.EnhancedURL(s.cfg.PublicBaseURL, phone, "off", s.cfg.LinkTTL)
 			footer = fmt.Sprintf("\n\nQuiet hours: Enable %s | Disable %s", enable, disable)
+			footer += fmt.Sprintf("\nEnhanced suggestions: On %s | Off %s", enhOn, enhOff)
 		}
 		return fmt.Sprintf("Kalshi picks:\n\n%s%s", picks, footer)
 	}
-	return fmt.Sprintf("Kalshi picks (reply TOOK <id> / PASS <id>):\n\n%s\n\nReply STOP to unsubscribe.", picks)
+	return fmt.Sprintf("Kalshi picks (reply TOOK <id> / PASS <id>):\n\n%s\n\nReply STOP to unsubscribe. Text ENHANCED ON for ML-ranked picks.", picks)
 }
 
 func (s *Scanner) onboardBody(link string) string {
