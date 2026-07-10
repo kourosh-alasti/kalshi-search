@@ -8,7 +8,7 @@ No web UI — everything is configured through environment variables and control
 
 - **Scanner loop** polls Kalshi's Trade API v2 (read-only, RSA-PSS signed requests) on `POLL_INTERVAL`, filters open markets by price, volume, open interest, close time, and your enabled categories, ranks the survivors with a preference model, and texts the top picks as one digest SMS with `kalshi.com` links that open the Kalshi app on your phone.
 - **SMS commands**: the first message you receive includes a short-lived link to choose categories and subcategories. Reply `TOOK 12` / `PASS 12` to give feedback on suggestion #12, `STATUS`, `PAUSE`, or `RESUME`. Use `PREFS` for a fresh preferences link, `WATCH TICKER` / `UNWATCH TICKER` for ticker alerts, `QUIET 22-8` with `ENABLE`/`DISABLE` to control quiet hours, and `WHY 12` to see why a pick was suggested.
-- **Learning**: every suggestion decomposes into features (category, series, price band, close-time bucket, volume bucket) with accept/reject counts per user. Feedback comes from your `TOOK`/`PASS` replies and automatically from your portfolio — if a new position appears in a suggested market, it counts as accepted. All suggestions and labels are stored in libSQL for future ML training (see the plan's "Future: ML-based learning").
+- **Learning**: every suggestion decomposes into features (category, series, price band, close-time bucket, volume bucket) with accept/reject counts per user. Feedback comes from your `TOOK`/`PASS` replies and automatically from your portfolio — if a new position appears in a suggested market, it counts as accepted. Opt into **enhanced suggestions** (`ENHANCED ON` or email link) to rank picks with a per-user logistic model trained on your labeled history once you have enough feedback.
 - **Dedup**: each market alerts at most once per user; it re-alerts only if the price drops by `REALERT_DROP_CENTS`. `PASS`ed markets never alert again.
 - **Persistence**: all state is stored in [libSQL](https://github.com/tursodatabase/libsql) keyed by phone number. Each alert recipient has independent categories, preferences, and suggestion history.
 
@@ -116,6 +116,7 @@ On first boot the bot sends you a short-lived link to choose categories and subc
 | `SCAN_CYCLE_TIMEOUT` | `4m` | Max duration for one scan cycle |
 | `EVENTS_CACHE_TTL` | `30s` | Reuse Kalshi event list between cycles |
 | `PASS_SUPPRESS_DAYS` | `30` | Days a `PASS` suppresses a market (0 = forever) |
+| `ML_MIN_TRAINING_EXAMPLES` | `8` | Labeled picks required before ML ranking activates |
 | `MAX_PER_SERIES_DIGEST` | `2` | Max picks per series in one digest |
 | `LINK_SIGNING_SECRET` | — | HMAC secret for email action links (required when `ENABLED=true`) |
 | `LINK_TTL` | `168h` | Signed feedback/toggle link lifetime |

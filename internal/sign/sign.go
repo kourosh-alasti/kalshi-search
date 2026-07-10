@@ -110,3 +110,29 @@ func (s *Signer) VerifyToggle(userEnc, toggle string, exp int64, sig string) (st
 func (s *Signer) PrefsURL(baseURL, token string) string {
 	return fmt.Sprintf("%s/onboard/%s", strings.TrimRight(baseURL, "/"), url.PathEscape(token))
 }
+
+// EnhancedURL builds a signed link to opt in or out of ML-enhanced suggestions.
+func (s *Signer) EnhancedURL(baseURL, user, action string, ttl time.Duration) string {
+	action = strings.ToLower(strings.TrimSpace(action))
+	exp := time.Now().Add(ttl).Unix()
+	u := encodeUser(user)
+	sig := s.mac("enhanced", u, action, strconv.FormatInt(exp, 10))
+	return fmt.Sprintf("%s/enhanced/%s?action=%s&exp=%d&sig=%s",
+		strings.TrimRight(baseURL, "/"), u, action, exp, sig)
+}
+
+// VerifyEnhanced checks an enhanced-suggestions toggle link.
+func (s *Signer) VerifyEnhanced(userEnc, action string, exp int64, sig string) (string, error) {
+	if time.Now().Unix() > exp {
+		return "", fmt.Errorf("link expired")
+	}
+	action = strings.ToLower(strings.TrimSpace(action))
+	if action != "on" && action != "off" {
+		return "", fmt.Errorf("invalid action")
+	}
+	want := s.mac("enhanced", userEnc, action, strconv.FormatInt(exp, 10))
+	if !hmac.Equal([]byte(want), []byte(sig)) {
+		return "", fmt.Errorf("invalid signature")
+	}
+	return decodeUser(userEnc)
+}

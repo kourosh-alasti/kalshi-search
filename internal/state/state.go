@@ -95,8 +95,9 @@ type Data struct {
 	TagsByCategory   map[string][]string       `json:"tags_by_category"`
 	FilterOverrides  FilterOverrides           `json:"filter_overrides"`
 	QuietHours       QuietHours                `json:"quiet_hours"`
-	Watchlist        map[string]*WatchItem     `json:"watchlist"`
-	NextSuggestionID int                       `json:"next_suggestion_id"`
+	Watchlist            map[string]*WatchItem     `json:"watchlist"`
+	EnhancedSuggestions  bool                      `json:"enhanced_suggestions"`
+	NextSuggestionID     int                       `json:"next_suggestion_id"`
 	Suggestions      map[string]*Suggestion    `json:"suggestions"`
 	Alerted          map[string]*AlertedMarket `json:"alerted"`
 	Features         map[string]*FeatureStats  `json:"features"`
@@ -188,18 +189,19 @@ func (s *Store) loadLocked(ctx context.Context, phone string) (*Data, error) {
 	}
 
 	var menuJSON, catsJSON, tagsJSON, subsJSON, filtersJSON, quietJSON string
-	var onboarded, paused int
+	var onboarded, paused, enhanced int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT onboarded, paused, category_menu, categories, tags_by_category, subcategories,
-			filter_overrides, quiet_hours, next_suggestion_id
+			filter_overrides, quiet_hours, enhanced_suggestions, next_suggestion_id
 		FROM users WHERE phone = ?`, phone).Scan(
 		&onboarded, &paused, &menuJSON, &catsJSON, &tagsJSON, &subsJSON,
-		&filtersJSON, &quietJSON, &data.NextSuggestionID)
+		&filtersJSON, &quietJSON, &enhanced, &data.NextSuggestionID)
 	if err != nil {
 		return nil, fmt.Errorf("loading user %s: %w", phone, err)
 	}
 	data.Onboarded = onboarded != 0
 	data.Paused = paused != 0
+	data.EnhancedSuggestions = enhanced != 0
 	if err := decodeJSON(menuJSON, &data.CategoryMenu); err != nil {
 		return nil, fmt.Errorf("decoding category_menu for %s: %w", phone, err)
 	}
@@ -399,11 +401,12 @@ func (s *Store) saveLocked(ctx context.Context, phone string, d *Data) error {
 		UPDATE users SET
 			onboarded = ?, paused = ?, category_menu = ?, categories = ?,
 			tags_by_category = ?, subcategories = ?,
-			filter_overrides = ?, quiet_hours = ?,
+			filter_overrides = ?, quiet_hours = ?, enhanced_suggestions = ?,
 			next_suggestion_id = ?, updated_at = ?
 		WHERE phone = ?`,
 		boolInt(d.Onboarded), boolInt(d.Paused), string(menuJSON), string(catsJSON),
 		string(tagsJSON), string(subsJSON), string(filtersJSON), string(quietJSON),
+		boolInt(d.EnhancedSuggestions),
 		d.NextSuggestionID, now, phone)
 	if err != nil {
 		return fmt.Errorf("updating user %s: %w", phone, err)

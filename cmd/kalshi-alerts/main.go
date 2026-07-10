@@ -101,7 +101,7 @@ func main() {
 
 	stats := &scanstats.Tracker{}
 	inboundQ := inbound.New(sqlDB, logger)
-	scorer := learning.NewCounterScorer(store, logger)
+	scorer := learning.NewPreferenceScorer(store, sqlDB, cfg.MLMinTrainingExamples, logger)
 	sugLog := learning.NewSuggestionLog(sqlDB, logger)
 	cmdHandler := commands.New(cfg, store, msgClient, scorer, sugLog, signer, logger)
 

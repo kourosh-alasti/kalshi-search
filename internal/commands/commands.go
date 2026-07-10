@@ -23,14 +23,14 @@ type Handler struct {
 	cfg    *config.Config
 	store  *state.Store
 	sms    sms.Client
-	scorer *learning.CounterScorer
+	scorer *learning.PreferenceScorer
 	sugLog *learning.SuggestionLog
 	signer *sign.Signer
 	logger *slog.Logger
 }
 
 // New returns a command handler.
-func New(cfg *config.Config, store *state.Store, smsClient sms.Client, scorer *learning.CounterScorer,
+func New(cfg *config.Config, store *state.Store, smsClient sms.Client, scorer *learning.PreferenceScorer,
 	sugLog *learning.SuggestionLog, signer *sign.Signer, logger *slog.Logger) *Handler {
 	return &Handler{
 		cfg: cfg, store: store, sms: smsClient, scorer: scorer, sugLog: sugLog,
@@ -46,6 +46,8 @@ var (
 	quietRe      = regexp.MustCompile(`(?i)^QUIET\s+(\d{1,2})\s*-\s*(\d{1,2})$`)
 	whyRe        = regexp.MustCompile(`(?i)^WHY\s+#?(\d+)$`)
 	filterRe     = regexp.MustCompile(`(?i)^(PRICE|VOLUME|OI|CLOSE)\s+(\d+)$`)
+	enhancedRe   = regexp.MustCompile(`(?i)^ENHANCED\s+(ON|OFF)$`)
+	enhanceRe    = regexp.MustCompile(`(?i)^ENHANCE\s+(ON|OFF)$`)
 )
 
 // Handle processes one inbound message and delivers the reply.
@@ -87,6 +89,14 @@ func (h *Handler) Handle(ctx context.Context, from, text string) error {
 		m := whyRe.FindStringSubmatch(text)
 		id, _ := strconv.Atoi(m[1])
 		reply = h.why(ctx, from, id)
+	case enhancedRe.MatchString(text) || enhanceRe.MatchString(text):
+		var action string
+		if enhancedRe.MatchString(text) {
+			action = enhancedRe.FindStringSubmatch(text)[1]
+		} else {
+			action = enhanceRe.FindStringSubmatch(text)[1]
+		}
+		reply = h.setEnhanced(ctx, from, strings.EqualFold(action, "ON"))
 	case filterRe.MatchString(text):
 		m := filterRe.FindStringSubmatch(text)
 		val, _ := strconv.Atoi(m[2])
@@ -134,6 +144,7 @@ func (h *Handler) Handle(ctx context.Context, from, text string) error {
 
 func (h *Handler) helpText() string {
 	return "Commands:\nTOOK/PASS <id> — feedback\nWHY <id> — why we suggested it\nPREFS — update categories\n" +
+		"ENHANCED ON/OFF — ML-ranked enhanced suggestions\n" +
 		"WATCH <ticker> [max¢] / UNWATCH <ticker>\nQUIET 22-8 / QUIET OFF\nENABLE/DISABLE — quiet hours on/off\n" +
 		"PRICE/VOLUME/OI/CLOSE <n> — your filter overrides\nRESET FILTERS — clear overrides\nSTATUS, PAUSE, RESUME"
 }
@@ -177,6 +188,20 @@ func (h *Handler) unwatch(ctx context.Context, phone, ticker string) string {
 		return "Something went wrong, try again."
 	}
 	return fmt.Sprintf("Stopped watching %s.", ticker)
+}
+
+func (h *Handler) setEnhanced(ctx context.Context, phone string, enabled bool) string {
+	err := h.store.Update(ctx, phone, func(d *state.Data) {
+		d.EnhancedSuggestions = enabled
+	})
+	if err != nil {
+		return "Something went wrong, try again."
+	}
+	if enabled {
+		return fmt.Sprintf("Enhanced suggestions ON. Picks will use ML ranking once you have enough TOOK/PASS feedback (%d+ labels). Reply ENHANCED OFF to revert.",
+			h.cfg.MLMinTrainingExamples)
+	}
+	return "Enhanced suggestions OFF. Using standard preference ranking."
 }
 
 func (h *Handler) setQuietHours(ctx context.Context, phone string, start, end int) string {
@@ -393,6 +418,7 @@ func (h *Handler) status(ctx context.Context, phone string) string {
 	var subcategories map[string][]string
 	var quiet state.QuietHours
 	var overrides state.FilterOverrides
+	var enhanced bool
 	var watchlist []string
 	var pending, took, passed, positions int
 	if err := h.store.View(ctx, phone, func(d *state.Data) {
@@ -401,6 +427,7 @@ func (h *Handler) status(ctx context.Context, phone string) string {
 		subcategories = d.Subcategories
 		quiet = d.QuietHours
 		overrides = d.FilterOverrides
+		enhanced = d.EnhancedSuggestions
 		for t := range d.Watchlist {
 			watchlist = append(watchlist, t)
 		}
@@ -442,9 +469,13 @@ func (h *Handler) status(ctx context.Context, phone string) string {
 		overrides.MinOpenInterest != nil || overrides.CloseWithinHours != nil {
 		filterStr = "custom (RESET FILTERS to clear)"
 	}
+	enhStr := "off"
+	if enhanced {
+		enhStr = "on"
+	}
 	subs := formatSubs(subcategories)
-	return fmt.Sprintf("Status: %s\nCategories: %s\nSubcategories: %s\nWatchlist: %s\nQuiet hours: %s\nFilters: %s\nSuggestions: %d pending, %d took, %d passed, %d auto-trades",
-		stateStr, cats, subs, watchStr, quietStr, filterStr, pending, took, passed, positions)
+	return fmt.Sprintf("Status: %s\nCategories: %s\nSubcategories: %s\nWatchlist: %s\nQuiet hours: %s\nEnhanced: %s\nFilters: %s\nSuggestions: %d pending, %d took, %d passed, %d auto-trades",
+		stateStr, cats, subs, watchStr, quietStr, enhStr, filterStr, pending, took, passed, positions)
 }
 
 func formatSubs(subcategories map[string][]string) string {
