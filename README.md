@@ -7,7 +7,7 @@ No web UI — everything is configured through environment variables and control
 ## How it works
 
 - **Scanner loop** polls Kalshi's Trade API v2 (read-only, RSA-PSS signed requests) on `POLL_INTERVAL`, filters open markets by price, volume, open interest, close time, and your enabled categories, ranks the survivors with a preference model, and texts the top picks as one digest SMS with `kalshi.com` links that open the Kalshi app on your phone.
-- **SMS commands**: the first message you receive includes a short-lived link to choose categories and subcategories. Reply `TOOK 12` / `PASS 12` to give feedback on suggestion #12, `STATUS`, `PAUSE`, or `RESUME`.
+- **SMS commands**: the first message you receive includes a short-lived link to choose categories and subcategories. Reply `TOOK 12` / `PASS 12` to give feedback on suggestion #12, `STATUS`, `PAUSE`, or `RESUME`. Use `PREFS` for a fresh preferences link, `WATCH TICKER` / `UNWATCH TICKER` for ticker alerts, `QUIET 22-8` with `ENABLE`/`DISABLE` to control quiet hours, and `WHY 12` to see why a pick was suggested.
 - **Learning**: every suggestion decomposes into features (category, series, price band, close-time bucket, volume bucket) with accept/reject counts per user. Feedback comes from your `TOOK`/`PASS` replies and automatically from your portfolio — if a new position appears in a suggested market, it counts as accepted. All suggestions and labels are stored in libSQL for future ML training (see the plan's "Future: ML-based learning").
 - **Dedup**: each market alerts at most once per user; it re-alerts only if the price drops by `REALERT_DROP_CENTS`. `PASS`ed markets never alert again.
 - **Persistence**: all state is stored in [libSQL](https://github.com/tursodatabase/libsql) keyed by phone number. Each alert recipient has independent categories, preferences, and suggestion history.
@@ -113,8 +113,19 @@ On first boot the bot sends you a short-lived link to choose categories and subc
 | `PORT` | `8080` | HTTP port (webhook + healthz + onboarding) |
 | `PUBLIC_BASE_URL` | — | Public app URL for onboarding links (required) |
 | `ONBOARDING_TOKEN_TTL` | `24h` | How long preference links stay valid |
+| `SCAN_CYCLE_TIMEOUT` | `4m` | Max duration for one scan cycle |
+| `EVENTS_CACHE_TTL` | `30s` | Reuse Kalshi event list between cycles |
+| `PASS_SUPPRESS_DAYS` | `30` | Days a `PASS` suppresses a market (0 = forever) |
+| `MAX_PER_SERIES_DIGEST` | `2` | Max picks per series in one digest |
+| `LINK_SIGNING_SECRET` | — | HMAC secret for email action links (required when `ENABLED=true`) |
+| `LINK_TTL` | `168h` | Signed feedback/toggle link lifetime |
+| `INSTANCE_ID` | auto | Unique id for leader election |
+| `LEADER_ELECTION` | `true` | Only one instance runs the scanner when multiple replicas deploy |
+| `METRICS_ENABLED` | `true` | Expose Prometheus metrics on `GET /metrics` |
 | `LOG_LEVEL` | `info` | `debug` logs per-market filter/score decisions |
 
 ## Logging
 
 Structured JSON logs on stdout via `log/slog`: every scan cycle (events/markets fetched, matches, per-reason filter counts, duration), every Kalshi and SMS HTTP call (status, latency), every alert, every inbound command, and all errors with context. Set `LOG_LEVEL=debug` to see why each individual market was filtered or how each suggestion was scored.
+
+`GET /healthz` returns JSON with the last scan cycle stats, inbound queue depth, and leader status. `GET /metrics` exposes Prometheus metrics when `METRICS_ENABLED=true`.

@@ -90,11 +90,42 @@ CREATE TABLE IF NOT EXISTS onboarding_tokens (
 	created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_onboarding_tokens_phone ON onboarding_tokens(phone);
+
+CREATE TABLE IF NOT EXISTS inbound_messages (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	phone TEXT NOT NULL,
+	body TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	received_at TEXT NOT NULL,
+	processed_at TEXT,
+	error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_pending ON inbound_messages(status, received_at);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+	phone TEXT NOT NULL,
+	ticker TEXT NOT NULL,
+	max_price_cents INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (phone, ticker)
+);
+
+CREATE TABLE IF NOT EXISTS scanner_locks (
+	lock_name TEXT PRIMARY KEY,
+	holder_id TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
 `
 
 var migrations = []string{
 	`ALTER TABLE users ADD COLUMN tags_by_category TEXT NOT NULL DEFAULT '{}'`,
 	`ALTER TABLE users ADD COLUMN subcategories TEXT NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE users ADD COLUMN filter_overrides TEXT NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE users ADD COLUMN quiet_hours TEXT NOT NULL DEFAULT '{"enabled":false,"start_hour":22,"end_hour":8,"timezone":"America/New_York"}'`,
+	`ALTER TABLE alerted_markets ADD COLUMN suppressed_until TEXT`,
+	`ALTER TABLE alerted_markets ADD COLUMN last_volume INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE alerted_markets ADD COLUMN last_close_hours REAL NOT NULL DEFAULT 0`,
 }
 
 // Open connects to libSQL and runs schema migrations.

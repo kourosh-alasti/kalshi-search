@@ -25,6 +25,8 @@ func main() {
 	stubs := [][2]string{
 		{"LIBSQL_URL", "http://127.0.0.1:8080"},
 		{"PUBLIC_BASE_URL", "http://127.0.0.1:8080"},
+		{"LIBSQL_AUTH_TOKEN", "verify-stub-secret"},
+		{"LINK_SIGNING_SECRET", "verify-stub-secret"},
 	}
 	switch channel {
 	case "email":
