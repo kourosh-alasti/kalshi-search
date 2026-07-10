@@ -34,6 +34,7 @@ type Server struct {
 	signer            *sign.Signer
 	stats             *scanstats.Tracker
 	logger            *slog.Logger
+	scannerEnabled    bool
 	healthy           atomic.Bool
 }
 
@@ -56,6 +57,7 @@ func New(cfg *config.Config, handler *commands.Handler, store *state.Store, inbo
 		signer:            signer,
 		stats:             stats,
 		logger:            logger.With("component", "server"),
+		scannerEnabled:    cfg.Enabled,
 	}
 	s.healthy.Store(true)
 	return s

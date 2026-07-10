@@ -13,6 +13,15 @@ import (
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if !s.scannerEnabled {
+		snap := scanstats.Snapshot{Healthy: true}
+		if s.stats != nil {
+			snap = s.stats.Get()
+			snap.Healthy = true
+		}
+		writeHealth(w, http.StatusOK, snap)
+		return
+	}
 	if s.stats != nil {
 		snap := s.stats.Get()
 		if !snap.Healthy {
